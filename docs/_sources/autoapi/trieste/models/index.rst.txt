@@ -1,0 +1,289 @@
+:mod:`trieste.models`
+=====================
+
+.. py:module:: trieste.models
+
+.. autoapi-nested-parse::
+
+   This package contains the primary interfaces for probabilistic models, :class:`ProbabilisticModel`
+   and its trainable subclass :class:`TrainableProbabilisticModel`. It also contains a number of
+   :class:`TrainableProbabilisticModel` wrappers for GPflow models, as well as tooling for creating
+   :class:`TrainableProbabilisticModel`\ s from config.
+
+
+
+Submodules
+----------
+.. toctree::
+   :titlesonly:
+   :maxdepth: 1
+
+   optimizer/index.rst
+
+
+Package Contents
+----------------
+
+.. class:: ModelConfig
+
+   Specification for building a :class:`~trieste.models.TrainableProbabilisticModel`. 
+
+   .. attribute:: model
+      :annotation: :Union[tf.Module, TrainableProbabilisticModel]
+
+      The :class:`~trieste.models.TrainableProbabilisticModel`, or the model to wrap in one. 
+
+
+   .. attribute:: optimizer
+      :annotation: :Union[gpflow.optimizers.Scipy, tf.optimizers.Optimizer]
+
+      The optimizer with which to train the model (by minimizing its loss function). 
+
+
+   .. attribute:: optimizer_args
+      :annotation: :Dict[str, Any]
+
+      The keyword arguments to pass to the optimizer wrapper. 
+
+
+   .. method:: create_from_dict(d: Dict[(str, Any)]) -> trieste.models.config.ModelConfig
+      :staticmethod:
+
+      :param d: A dictionary from which to construct this :class:`ModelConfig`.
+      :return: A :class:`ModelConfig` built from ``d``.
+      :raise TypeError: If the keys in ``d`` do not correspond to the parameters of
+          :class:`ModelConfig`.
+
+
+   .. method:: create_model_interface(self) -> trieste.models.model_interfaces.TrainableProbabilisticModel
+
+      :return: A model built from this model configuration.
+
+
+
+.. data:: ModelSpec
+   
+
+   Type alias for any type that can be used to fully specify a model. 
+
+
+.. function:: create_model(config: ModelSpec) -> trieste.models.model_interfaces.TrainableProbabilisticModel
+
+   :param config: A :class:`TrainableProbabilisticModel` or configuration of a model.
+   :return: A :class:`~trieste.models.TrainableProbabilisticModel` build according to ``config``.
+
+
+.. class:: GaussianProcessRegression(model: Union[(GPR, SGPR)], optimizer: Optional[Optimizer] = None)
+
+
+   Bases: :class:`trieste.models.model_interfaces.GPflowPredictor`, :class:`trieste.models.model_interfaces.TrainableProbabilisticModel`
+
+   A trainable wrapper for a GPflow Gaussian process model. 
+
+   :param model: The GPflow model to wrap.
+   :param optimizer: The optimizer with which to train the model. Defaults to
+       :class:`~trieste.models.optimizer.Optimizer` with :class:`~gpflow.optimizers.Scipy`.
+
+   .. method:: model(self) -> Union[(GPR, SGPR)]
+      :property:
+
+      The underlying GPflow model. 
+
+
+   .. method:: update(self, dataset: trieste.data.Dataset) -> None
+
+      Update the model given the specified ``dataset``. Does not train the model.
+
+      :param dataset: The data with which to update the model.
+
+
+
+.. class:: GPflowPredictor(optimizer: Optional[Optimizer] = None)
+
+
+   Bases: :class:`trieste.models.model_interfaces.ProbabilisticModel`, :class:`abc.ABC`
+
+   A trainable wrapper for a GPflow Gaussian process model. 
+
+   :param optimizer: The optimizer with which to train the model. Defaults to
+       :class:`~trieste.models.optimizer.Optimizer` with :class:`~gpflow.optimizers.Scipy`.
+
+   .. method:: model(self) -> gpflow.models.GPModel
+      :property:
+
+      The underlying GPflow model. 
+
+
+   .. method:: predict(self, query_points: trieste.type.TensorType) -> Tuple[(TensorType, TensorType)]
+
+      Return the mean and variance of the independent marginal distributions at each point in
+      ``query_points``.
+
+      This is essentially a convenience method for :meth:`predict_joint`, where non-event
+      dimensions of ``query_points`` are all interpreted as broadcasting dimensions instead of
+      batch dimensions, and the covariance is squeezed to remove redundant nesting.
+
+      :param query_points: The points at which to make predictions, of shape [..., D].
+      :return: The mean and variance of the independent marginal distributions at each point in
+          ``query_points``. For a predictive distribution with event shape E, the mean and
+          variance will both have shape [...] + E.
+
+
+   .. method:: predict_joint(self, query_points: trieste.type.TensorType) -> Tuple[(TensorType, TensorType)]
+
+      :param query_points: The points at which to make predictions, of shape [..., B, D].
+      :return: The mean and covariance of the joint marginal distribution at each batch of points
+          in ``query_points``. For a predictive distribution with event shape E, the mean will
+          have shape [..., B] + E, and the covariance shape [...] + E + [B, B].
+
+
+   .. method:: sample(self, query_points: trieste.type.TensorType, num_samples: int) -> trieste.type.TensorType
+
+      Return ``num_samples`` samples from the independent marginal distributions at
+      ``query_points``.
+
+      :param query_points: The points at which to sample, with shape [..., D].
+      :param num_samples: The number of samples at each point.
+      :return: The samples. For a predictive distribution with event shape E, this has shape
+          [..., S] + E, where S is the number of samples.
+
+
+
+.. class:: ProbabilisticModel(name=None)
+
+
+   Bases: :class:`tensorflow.Module`, :class:`abc.ABC`
+
+   A probabilistic model. 
+
+   .. method:: predict(self, query_points: trieste.type.TensorType) -> Tuple[(TensorType, TensorType)]
+      :abstractmethod:
+
+      Return the mean and variance of the independent marginal distributions at each point in
+      ``query_points``.
+
+      This is essentially a convenience method for :meth:`predict_joint`, where non-event
+      dimensions of ``query_points`` are all interpreted as broadcasting dimensions instead of
+      batch dimensions, and the covariance is squeezed to remove redundant nesting.
+
+      :param query_points: The points at which to make predictions, of shape [..., D].
+      :return: The mean and variance of the independent marginal distributions at each point in
+          ``query_points``. For a predictive distribution with event shape E, the mean and
+          variance will both have shape [...] + E.
+
+
+   .. method:: predict_joint(self, query_points: trieste.type.TensorType) -> Tuple[(TensorType, TensorType)]
+      :abstractmethod:
+
+      :param query_points: The points at which to make predictions, of shape [..., B, D].
+      :return: The mean and covariance of the joint marginal distribution at each batch of points
+          in ``query_points``. For a predictive distribution with event shape E, the mean will
+          have shape [..., B] + E, and the covariance shape [...] + E + [B, B].
+
+
+   .. method:: sample(self, query_points: trieste.type.TensorType, num_samples: int) -> trieste.type.TensorType
+      :abstractmethod:
+
+      Return ``num_samples`` samples from the independent marginal distributions at
+      ``query_points``.
+
+      :param query_points: The points at which to sample, with shape [..., D].
+      :param num_samples: The number of samples at each point.
+      :return: The samples. For a predictive distribution with event shape E, this has shape
+          [..., S] + E, where S is the number of samples.
+
+
+
+.. class:: SparseVariational(model: gpflow.models.SVGP, data: trieste.data.Dataset, optimizer: Optional[Optimizer] = None)
+
+
+   Bases: :class:`trieste.models.model_interfaces.GPflowPredictor`, :class:`trieste.models.model_interfaces.TrainableProbabilisticModel`
+
+   A trainable wrapper for a GPflow Gaussian process model. 
+
+   :param model: The underlying GPflow sparse variational model.
+   :param data: The initial training data.
+   :param optimizer: The optimizer with which to train the model. Defaults to
+       :class:`~trieste.models.optimizer.Optimizer` with :class:`~gpflow.optimizers.Scipy`.
+
+   .. method:: model(self) -> gpflow.models.SVGP
+      :property:
+
+      The underlying GPflow model. 
+
+
+   .. method:: update(self, dataset: trieste.data.Dataset) -> None
+
+      Update the model given the specified ``dataset``. Does not train the model.
+
+      :param dataset: The data with which to update the model.
+
+
+
+.. class:: TrainableProbabilisticModel(name=None)
+
+
+   Bases: :class:`trieste.models.model_interfaces.ProbabilisticModel`
+
+   A trainable probabilistic model. 
+
+   .. method:: update(self, dataset: trieste.data.Dataset) -> None
+      :abstractmethod:
+
+      Update the model given the specified ``dataset``. Does not train the model.
+
+      :param dataset: The data with which to update the model.
+
+
+   .. method:: optimize(self, dataset: trieste.data.Dataset) -> None
+      :abstractmethod:
+
+      Optimize the model objective with respect to (hyper)parameters given the specified
+      ``dataset``.
+
+      :param dataset: The data with which to train the model.
+
+
+
+.. class:: VariationalGaussianProcess(model: gpflow.models.VGP, optimizer: Optional[Optimizer] = None)
+
+
+   Bases: :class:`trieste.models.model_interfaces.GPflowPredictor`, :class:`trieste.models.model_interfaces.TrainableProbabilisticModel`
+
+   A :class:`TrainableProbabilisticModel` wrapper for a GPflow :class:`~gpflow.models.VGP`. 
+
+   :param model: The GPflow :class:`~gpflow.models.VGP`.
+   :param optimizer: The optimizer with which to train the model. Defaults to
+       :class:`~trieste.models.optimizer.Optimizer` with :class:`~gpflow.optimizers.Scipy`.
+   :raise ValueError (or InvalidArgumentError): If ``model``'s :attr:`q_sqrt` is not rank 3.
+
+   .. method:: model(self) -> gpflow.models.VGP
+      :property:
+
+      The underlying GPflow model. 
+
+
+   .. method:: update(self, dataset: trieste.data.Dataset, *, jitter: float = DEFAULTS.JITTER) -> None
+
+      Update the model given the specified ``dataset``. Does not train the model.
+
+      :param dataset: The data with which to update the model.
+      :param jitter: The size of the jitter to use when stabilising the Cholesky decomposition of
+          the covariance matrix.
+
+
+   .. method:: predict(self, query_points: trieste.type.TensorType) -> Tuple[(TensorType, TensorType)]
+
+      :param query_points: The points at which to make predictions.
+      :return: The predicted mean and variance of the observations at the specified
+          ``query_points``.
+
+
+
+.. data:: supported_models
+   :annotation: :Dict[Any, Callable[[Any, Optimizer], TrainableProbabilisticModel]]
+
+   A mapping of third-party model types to :class:`CustomTrainable` classes that wrap models of those
+   types.
+
+
