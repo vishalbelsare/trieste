@@ -18,11 +18,14 @@ import tensorflow as tf
 
 from tests.util.misc import ShapeLike, empty_dataset, random_seed
 from trieste.data import Dataset
-from trieste.models.keras.utils import get_tensor_spec_from_data, sample_with_replacement
+from trieste.models.keras.utils import (
+    get_tensor_spec_from_data,
+    sample_model_index,
+    sample_with_replacement,
+)
 
 
 def test_get_tensor_spec_from_data_raises_for_incorrect_dataset() -> None:
-
     dataset = empty_dataset([1], [1])
 
     with pytest.raises(ValueError):
@@ -49,7 +52,6 @@ def test_get_tensor_spec_from_data(
 
 
 def test_sample_with_replacement_raises_for_invalid_dataset() -> None:
-
     dataset = empty_dataset([1], [1])
 
     with pytest.raises(ValueError):
@@ -57,7 +59,6 @@ def test_sample_with_replacement_raises_for_invalid_dataset() -> None:
 
 
 def test_sample_with_replacement_raises_for_empty_dataset() -> None:
-
     dataset = empty_dataset([1], [1])
 
     with pytest.raises(tf.errors.InvalidArgumentError):
@@ -67,7 +68,6 @@ def test_sample_with_replacement_raises_for_empty_dataset() -> None:
 @random_seed
 @pytest.mark.parametrize("rank", [2, 3])
 def test_sample_with_replacement_seems_correct(rank: int) -> None:
-
     n_rows = 100
     if rank == 2:
         x = tf.constant(np.arange(0, n_rows, 1), shape=[n_rows, 1])
@@ -102,3 +102,29 @@ def test_sample_with_replacement_seems_correct(rank: int) -> None:
     x = tf.cast(x[:, 0], dtype=tf.float32)
     assert (tf.reduce_mean(mean) - tf.reduce_mean(x)) < 1
     assert tf.math.abs(tf.math.reduce_std(mean) - tf.math.reduce_std(x) / 10.0) < 0.1
+
+
+@pytest.mark.parametrize("size", [2, 10])
+@pytest.mark.parametrize("num_samples", [0, 1, 10])
+def test_sample_model_index_call_shape(size: int, num_samples: int) -> None:
+    indices = sample_model_index(size, num_samples)
+
+    assert indices.shape == (num_samples,)
+
+
+@random_seed
+@pytest.mark.parametrize("size", [2, 5, 10, 20])
+def test_sample_model_index_size(size: int) -> None:
+    indices = sample_model_index(size, 1000)
+
+    assert tf.math.reduce_variance(tf.cast(indices, tf.float32)) > 0
+    assert tf.reduce_min(indices) >= 0
+    assert tf.reduce_max(indices) < size
+
+
+@pytest.mark.parametrize("size", [10, 20, 50, 100])
+def test_sample_model_index_no_replacement(size: int) -> None:
+    indices = sample_model_index(size, size)
+
+    assert tf.reduce_sum(indices) == tf.reduce_sum(tf.range(size))
+    assert tf.reduce_all(tf.unique_with_counts(indices)[2] == 1)

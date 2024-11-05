@@ -19,11 +19,6 @@ functionality to define your own. The :mod:`~trieste.ask_tell_optimization` pack
 for Ask-Tell optimization and manual control of the optimization loop.
 The :mod:`~trieste.objectives` package contains several popular objective functions,
 useful for experimentation.
-
-Bibliography
-============
-
-.. bibliography::
 """
 from . import (
     acquisition,
@@ -37,3 +32,4 @@ from . import (
     types,
     utils,
 )
+from .version import __version__

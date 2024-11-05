@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Active Learning
+# # Active learning
 
 # %% [markdown]
 # Sometimes, we may just want to learn a black-box function, rather than optimizing it. This goal is known as active learning and corresponds to choosing query points that reduce our model uncertainty. This notebook demonstrates how to perform Bayesian active learning using Trieste.
@@ -19,16 +19,17 @@ tf.random.set_seed(1793)
 
 
 # %%
-from trieste.objectives import BRANIN_SEARCH_SPACE, scaled_branin
-from util.plotting_plotly import plot_function_plotly
-from trieste.space import Box
+from trieste.objectives import ScaledBranin
+from trieste.experimental.plotting import plot_function_plotly
 
-search_space = BRANIN_SEARCH_SPACE
+scaled_branin = ScaledBranin.objective
+search_space = ScaledBranin.search_space
 
 fig = plot_function_plotly(
-    scaled_branin, search_space.lower, search_space.upper, grid_density=20
+    scaled_branin,
+    search_space.lower,
+    search_space.upper,
 )
-fig.update_layout(height=400, width=400)
 fig.show()
 
 # %% [markdown]
@@ -92,13 +93,12 @@ observations = dataset.observations.numpy()
 # Finally, we can check the performance of our `PredictiveVariance` active learning acquisition function by plotting the predictive variance landscape of our model. We can see how it samples regions for which our model is highly uncertain.
 
 # %%
-from util.plotting import plot_bo_points, plot_function_2d
+from trieste.experimental.plotting import plot_bo_points, plot_function_2d
 
 
 def plot_active_learning_query(
     result, bo_iter, num_initial_points, query_points, num_query=1
 ):
-
     for i in range(bo_iter):
 
         def pred_var(x):
@@ -109,7 +109,6 @@ def plot_active_learning_query(
             pred_var,
             search_space.lower - 0.01,
             search_space.upper + 0.01,
-            grid_density=100,
             contour=True,
             colorbar=True,
             figsize=(10, 6),
@@ -166,8 +165,6 @@ observations = dataset.observations.numpy()
 # Now we can visualize the batch predictive variance using our plotting function.
 
 # %%
-from util.plotting import plot_bo_points, plot_function_2d
-
 plot_active_learning_query(
     result, bo_iter, num_initial_points, query_points, num_query
 )

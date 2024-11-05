@@ -1,5 +1,5 @@
 # %% [markdown]
-# # EGO with a failure region
+# # Failure regions
 
 # %%
 from __future__ import annotations
@@ -23,7 +23,7 @@ import trieste
 
 def masked_branin(x):
     mask_nan = np.sqrt((x[:, 0] - 0.5) ** 2 + (x[:, 1] - 0.4) ** 2) < 0.3
-    y = np.array(trieste.objectives.branin(x))
+    y = np.array(trieste.objectives.Branin.objective(x))
     y[mask_nan] = np.nan
     return tf.convert_to_tensor(y.reshape(-1, 1), x.dtype)
 
@@ -41,12 +41,11 @@ search_space = Box([0, 0], [1, 1])
 # region.
 
 # %%
-from util.plotting_plotly import plot_function_plotly
+from trieste.experimental.plotting import plot_function_plotly
 
 fig = plot_function_plotly(
-    masked_branin, search_space.lower, search_space.upper, grid_density=70
+    masked_branin, search_space.lower, search_space.upper
 )
-fig.update_layout(height=400, width=400)
 fig.show()
 
 # %% [markdown]
@@ -110,19 +109,22 @@ classification_model = build_vgp_classifier(
 # We'll train the GPR model with the default Scipy-based L-BFGS optimizer, and the VGP model with the custom algorithm above.
 
 # %%
+from gpflow.keras import tf_keras
+
 from trieste.models import TrainableProbabilisticModel
 from trieste.models.gpflow.models import (
     GaussianProcessRegression,
     VariationalGaussianProcess,
 )
 from trieste.models.optimizer import BatchOptimizer
+from trieste.types import Tag
 
 
-models: dict[str, TrainableProbabilisticModel] = {
+models: dict[Tag, TrainableProbabilisticModel] = {
     OBJECTIVE: GaussianProcessRegression(regression_model),
     FAILURE: VariationalGaussianProcess(
         classification_model,
-        BatchOptimizer(tf.optimizers.Adam(1e-3)),
+        BatchOptimizer(tf_keras.optimizers.Adam(1e-3)),
         use_natgrads=True,
     ),
 }
@@ -178,7 +180,11 @@ print(f"query point: {result.datasets[OBJECTIVE].query_points[arg_min_idx, :]}")
 
 # %%
 import matplotlib.pyplot as plt
-from util.plotting import plot_gp_2d, plot_function_2d, plot_bo_points
+from trieste.experimental.plotting import (
+    plot_gp_2d,
+    plot_function_2d,
+    plot_bo_points,
+)
 
 mask_fail = (
     result.datasets[FAILURE].observations.numpy().flatten().astype(int) == 0
@@ -187,7 +193,7 @@ fig, ax = plot_function_2d(
     masked_branin,
     search_space.lower,
     search_space.upper,
-    grid_density=50,
+    grid_density=20,
     contour=True,
 )
 plot_bo_points(
@@ -202,7 +208,7 @@ plt.show()
 # We can also plot the mean and variance of the predictive distribution over the search space, first for the objective data and model ...
 
 # %%
-from util.plotting_plotly import (
+from trieste.experimental.plotting import (
     plot_model_predictions_plotly,
     add_bo_points_plotly,
 )
@@ -234,10 +240,10 @@ fig.show()
 
 # %%
 fig, ax = plot_gp_2d(
-    result.models[FAILURE].model,  # type: ignore
+    result.models[FAILURE].model,
     search_space.lower,
     search_space.upper,
-    grid_density=50,
+    grid_density=20,
     contour=True,
     figsize=(12, 5),
     predict_y=True,

@@ -41,7 +41,7 @@ search_space = Box([0, 0], [6, 6])
 # %%
 import trieste
 import matplotlib.pyplot as plt
-from util.inequality_constraints_utils import plot_objective_and_constraints
+from trieste.experimental.plotting import plot_objective_and_constraints
 
 plot_objective_and_constraints(search_space, Sim)
 plt.show()
@@ -74,7 +74,7 @@ initial_data = observer(search_space.sample(num_initial_points))
 # ... and visualise those points on the constrained objective. Note how the generated data is labelled, like the observer.
 
 # %%
-from util.inequality_constraints_utils import plot_init_query_points
+from trieste.experimental.plotting import plot_init_query_points
 
 plot_init_query_points(
     search_space,
@@ -151,6 +151,7 @@ plt.show()
 #
 # We'll now look at a batch-sequential approach to the same problem. Sometimes it's beneficial to query several points at a time instead of one. The acquisition function we used earlier, built by `ExpectedConstrainedImprovement`, only supports a batch size of 1, so we'll need a new acquisition function builder for larger batch sizes. We can implement this using the reparametrization trick with the Monte-Carlo sampler `BatchReparametrizationSampler`. Note that when we do this, we must initialise the sampler *outside* the acquisition function (here `batch_efi`). This is crucial: a given instance of a sampler produces repeatable, continuous samples, and we can use this to create a repeatable continuous acquisition function. Using a new sampler on each call would not result in a repeatable continuous acquisition function.
 
+
 # %%
 class BatchExpectedConstrainedImprovement(
     trieste.acquisition.AcquisitionFunctionBuilder
@@ -170,7 +171,7 @@ class BatchExpectedConstrainedImprovement(
             for tag, model in models.items()
         }
 
-        pf = trieste.acquisition.probability_of_feasibility(
+        pf = trieste.acquisition.probability_below_threshold(
             models[CONSTRAINT], self._threshold
         )(tf.expand_dims(objective_dataset.query_points, 1))
         is_feasible = pf >= 0.5
@@ -237,7 +238,7 @@ plt.show()
 # In the following plots each marker represents a query point. The x-axis is the index of the query point (where the first queried point has index 0), and the y-axis is the observed value. The vertical blue line denotes the end of initialisation/start of optimisation. Green points satisfy the constraint, red points do not.
 
 # %%
-from util.plotting import plot_regret
+from trieste.experimental.plotting import plot_regret
 
 mask_fail = constraint_data.observations.numpy() > Sim.threshold
 batch_mask_fail = batch_constraint_data.observations.numpy() > Sim.threshold
@@ -260,6 +261,7 @@ plot_regret(
 # ## Constrained optimization with more than one constraint
 #
 # We'll now show how to use a reducer to combine multiple constraints. The new problem `Sim2` inherits from the previous one its objective and first constraint, but also adds a second constraint. We start by adding an output to our observer, and creating a set of three models.
+
 
 # %%
 class Sim2(Sim):
@@ -333,19 +335,18 @@ mask_fail1 = (
     data[CONSTRAINT].observations.numpy().flatten().astype(int) > Sim2.threshold
 )
 mask_fail2 = (
-    data[CONSTRAINT].observations.numpy().flatten().astype(int)
+    data[CONSTRAINT2].observations.numpy().flatten().astype(int)
     > Sim2.threshold2
 )
 mask_fail = np.logical_or(mask_fail1, mask_fail2)
 
 import matplotlib.pyplot as plt
-from util.plotting import plot_function_2d, plot_bo_points
+from trieste.experimental.plotting import plot_function_2d, plot_bo_points
 
 fig, ax = plot_function_2d(
     masked_objective,
     search_space.lower,
     search_space.upper,
-    grid_density=50,
     contour=True,
 )
 plot_bo_points(
