@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Noise-free optimization with Expected Improvement
+# # Introduction to Bayesian optimization
 
 # %%
 import numpy as np
@@ -13,27 +13,24 @@ tf.random.set_seed(1793)
 #
 # In this example, we look to find the minimum value of the two-dimensional Branin function over the hypercube $[0, 1]^2$. The Branin function is a popular toy function used in Bayesian optimization literature. Trieste provides a selection of toy functions in `trieste.objectives` package, where besides the functions we also provide their minimizers, minima and search space definitions.
 #
-# Below we use a version of the Branin function scaled to the hypercube search space. For the Branin we use the predefined search space `BRANIN_SEARCH_SPACE`, but otherwise one would define the search space directly using a `Box` object (illustrated below as well). We also plot contours of the Branin over the search space.
+# Below we use a version of the Branin function scaled to the hypercube search space. For the Branin we use the predefined search space, but otherwise one would define the search space directly using a `Box` object (illustrated below as well). We also plot contours of the Branin over the search space.
 #
 #
 
 # %%
-from trieste.objectives import (
-    scaled_branin,
-    SCALED_BRANIN_MINIMUM,
-    BRANIN_SEARCH_SPACE,
-)
-from trieste.objectives.utils import mk_observer
-from util.plotting_plotly import plot_function_plotly
+from trieste.objectives import ScaledBranin
+from trieste.experimental.plotting import plot_function_plotly
 from trieste.space import Box
 
-search_space = BRANIN_SEARCH_SPACE  # predefined search space, for convenience
+scaled_branin = ScaledBranin.objective
+search_space = ScaledBranin.search_space  # predefined search space
 search_space = Box([0, 0], [1, 1])  # define the search space directly
 
 fig = plot_function_plotly(
-    scaled_branin, search_space.lower, search_space.upper, grid_density=20
+    scaled_branin,
+    search_space.lower,
+    search_space.upper,
 )
-fig.update_layout(height=400, width=400)
 fig.show()
 
 # %% [markdown]
@@ -125,25 +122,24 @@ dataset = result.try_get_final_dataset()
 # We can now get the best point found by the optimizer. Note this isn't necessarily the point that was last evaluated.
 
 # %%
-query_points = dataset.query_points.numpy()
-observations = dataset.observations.numpy()
+query_point, observation, arg_min_idx = result.try_get_optimal_point()
 
-arg_min_idx = tf.squeeze(tf.argmin(observations, axis=0))
-
-print(f"query point: {query_points[arg_min_idx, :]}")
-print(f"observation: {observations[arg_min_idx, :]}")
+print(f"query point: {query_point}")
+print(f"observation: {observation}")
 
 # %% [markdown]
 # We can visualise how the optimizer performed by plotting all the acquired observations, along with the true function values and optima, either in a two-dimensional contour plot ...
 
 # %%
-from util.plotting import plot_bo_points, plot_function_2d
+from trieste.experimental.plotting import plot_bo_points, plot_function_2d
+
+query_points = dataset.query_points.numpy()
+observations = dataset.observations.numpy()
 
 _, ax = plot_function_2d(
     scaled_branin,
     search_space.lower,
     search_space.upper,
-    grid_density=30,
     contour=True,
 )
 plot_bo_points(query_points, ax[0, 0], num_initial_points, arg_min_idx)
@@ -154,13 +150,13 @@ ax[0, 0].set_xlabel(r"$x_2$")
 # ... or as a three-dimensional plot
 
 # %%
-from util.plotting_plotly import add_bo_points_plotly
+from trieste.experimental.plotting import add_bo_points_plotly
 
 fig = plot_function_plotly(
-    scaled_branin, search_space.lower, search_space.upper, grid_density=20
+    scaled_branin,
+    search_space.lower,
+    search_space.upper,
 )
-fig.update_layout(height=500, width=500)
-
 fig = add_bo_points_plotly(
     x=query_points[:, 0],
     y=query_points[:, 1],
@@ -178,9 +174,9 @@ fig.show()
 
 # %%
 import matplotlib.pyplot as plt
-from util.plotting import plot_regret
+from trieste.experimental.plotting import plot_regret
 
-suboptimality = observations - SCALED_BRANIN_MINIMUM.numpy()
+suboptimality = observations - ScaledBranin.minimum.numpy()
 _, ax = plt.subplots(1, 2)
 plot_regret(
     suboptimality, ax[0], num_init=num_initial_points, idx_best=arg_min_idx
@@ -198,7 +194,7 @@ ax[0].set_xlabel("# evaluations")
 # We can visualise the model over the objective function by plotting the mean and 95% confidence intervals of its predictive distribution. Like with the data before, we can get the model with `.try_get_final_model()`.
 
 # %%
-from util.plotting_plotly import plot_model_predictions_plotly
+from trieste.experimental.plotting import plot_model_predictions_plotly
 
 fig = plot_model_predictions_plotly(
     result.try_get_final_model(),
@@ -219,7 +215,7 @@ fig = add_bo_points_plotly(
 fig.show()
 
 # %% [markdown]
-# We can also inspect the model hyperparameters, and use the history to see how the length scales evolved over iterations. Note the history is saved at the *start* of each step, and as such never includes the final result, so we'll add that ourselves.
+# We can also inspect the model hyperparameters, and use the history to see how the length scales evolved over iterations. By default, the model history is kept in memory though it's possibe to store it to disk instead using optimize's `track_path` argument (see [this tutorial](recovering_from_errors.ipynb)). Note also the history is saved at the *start* of each step, and as such never includes the final result, so we'll add that ourselves.
 
 # %%
 gpflow.utilities.print_summary(
@@ -263,8 +259,8 @@ result = bo.optimize(
     num_steps, result.try_get_final_dataset(), result.try_get_final_model()
 )
 dataset = result.try_get_final_dataset()
+_, _, arg_min_idx = result.try_get_optimal_point()
 
-arg_min_idx = tf.squeeze(tf.argmin(dataset.observations, axis=0))
 _, ax = plot_function_2d(
     scaled_branin,
     search_space.lower,
@@ -282,6 +278,45 @@ plot_bo_points(
 
 ax[0, 0].set_xlabel(r"$x_1$")
 ax[0, 0].set_xlabel(r"$x_2$")
+
+# %% [markdown]
+# ## Save the results
+#
+# Trieste provides two ways to save and restore optimization results. The first uses pickling to save the results (including the datasets and models), allowing them to be easily reloaded. **Note however that is not portable and not secure**. You should only try to load optimization results that you generated yourself on the same system (or a system with the same version libraries).
+
+# %%
+# save the results to a given path
+result.save("results_path")
+
+# load the results
+saved_result = trieste.bayesian_optimizer.OptimizationResult.from_path(  # type: ignore
+    "results_path"
+)
+saved_result.try_get_final_model().model
+
+# %% [markdown]
+# The second approach is to save the model using the tensorflow SavedModel format. This requires explicitly exporting the methods to be saved and results in a portable model than can be safely loaded and evaluated, but which can no longer be used in subsequent BO steps.
+
+# %%
+# save the model to a given path, exporting just the predict method
+from trieste.models.utils import get_module_with_variables
+
+module = get_module_with_variables(result.try_get_final_model())
+module.predict = tf.function(
+    model.predict,
+    input_signature=[tf.TensorSpec(shape=[None, 2], dtype=tf.float64)],
+)
+tf.saved_model.save(module, "model_path")
+
+# load the model
+saved_model = tf.saved_model.load("model_path")
+saved_model.predict(initial_query_points)
+
+# compare prediction results
+query_points = search_space.sample_sobol(1)
+print("Original model prediction: ", model.predict(query_points))
+print("Saved model prediction: ", saved_model.predict(query_points))
+
 
 # %% [markdown]
 # ## LICENSE

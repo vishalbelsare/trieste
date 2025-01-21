@@ -29,15 +29,21 @@ from tests.util.models.gpflow.models import (
     svgp_model,
     vgp_model,
 )
-from tests.util.models.gpflux.models import simple_two_layer_dgp_model, two_layer_dgp_model
+from tests.util.models.gpflux.models import (
+    separate_independent_kernel_two_layer_dgp_model,
+    simple_two_layer_dgp_model,
+    two_layer_dgp_model,
+)
 from trieste.data import Dataset
 from trieste.models.gpflow import (
     GaussianProcessRegression,
     GPflowPredictor,
+    SparseGaussianProcessRegression,
     SparseVariational,
     VariationalGaussianProcess,
 )
 from trieste.models.optimizer import DatasetTransformer, Optimizer
+from trieste.space import EncoderFunction
 from trieste.types import TensorType
 
 
@@ -45,19 +51,23 @@ from trieste.types import TensorType
     name="gpflow_interface_factory",
     params=[
         (GaussianProcessRegression, gpr_model),
-        (GaussianProcessRegression, sgpr_model),
+        (SparseGaussianProcessRegression, sgpr_model),
         (VariationalGaussianProcess, vgp_model),
         (SparseVariational, svgp_model),
     ],
+    ids=lambda mf: mf[1].__name__,
 )
 def _gpflow_interface_factory(request: Any) -> ModelFactoryType:
     def model_interface_factory(
-        x: TensorType, y: TensorType, optimizer: Optimizer | None = None
+        x: TensorType,
+        y: TensorType,
+        optimizer: Optimizer | None = None,
+        encoder: EncoderFunction | None = None,
     ) -> tuple[GPflowPredictor, Callable[[TensorType, TensorType], GPModel]]:
-        model_interface: type[GaussianProcessRegression] = request.param[0]
+        model_interface: Callable[..., GPflowPredictor] = request.param[0]
         base_model: GaussianProcessRegression = request.param[1](x, y)
         reference_model: Callable[[TensorType, TensorType], GPModel] = request.param[1]
-        return model_interface(base_model, optimizer=optimizer), reference_model
+        return model_interface(base_model, optimizer=optimizer, encoder=encoder), reference_model
 
     return model_interface_factory
 
@@ -89,16 +99,13 @@ def _compile_fixture(request: Any) -> bool:
     return request.param
 
 
-@pytest.fixture(name="two_layer_model", params=[two_layer_dgp_model, simple_two_layer_dgp_model])
+@pytest.fixture(
+    name="two_layer_model",
+    params=[
+        two_layer_dgp_model,
+        simple_two_layer_dgp_model,
+        separate_independent_kernel_two_layer_dgp_model,
+    ],
+)
 def _two_layer_model_fixture(request: Any) -> Callable[[TensorType], DeepGP]:
     return request.param
-
-
-# Teardown fixture to set keras floatx to float64 then return it to previous value at test finish
-# pytest uses yield in a funny way, so we use type ignore
-@pytest.fixture(name="keras_float")  # type: ignore
-def _keras_float() -> None:
-    current_float = tf.keras.backend.floatx()
-    tf.keras.backend.set_floatx("float64")
-    yield
-    tf.keras.backend.set_floatx(current_float)

@@ -18,15 +18,16 @@ creating :class:`TrainableProbabilisticModel`\ s from config.
 """
 
 from . import gpflow, gpflux, keras, optimizer
-from .config import ModelConfig, ModelRegistry, ModelSpec, create_model
 from .interfaces import (
     FastUpdateModel,
     ModelStack,
     ProbabilisticModel,
     ProbabilisticModelType,
     ReparametrizationSampler,
+    SupportsCovarianceWithTopFidelity,
     TrainableModelStack,
     TrainableProbabilisticModel,
     TrajectoryFunction,
+    TrajectoryFunctionClass,
     TrajectorySampler,
 )

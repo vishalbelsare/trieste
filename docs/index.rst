@@ -23,12 +23,12 @@ Trieste is a research toolbox built on `TensorFlow <http://www.tensorflow.org/>`
 
 Without loss of generality, Trieste only supports minimizing the
 objective function. In the simplest case of an objective function with one-dimensional real
-output :math:`f: X \mapsto \mathbb R`, this is
+output :math:`f: X \to \mathbb R`, this is
 
 .. math:: \mathop{\mathrm{argmin}}_{x \in X} f(x) \qquad .
 
 When the objective function has higher-dimensional output, we can still talk of finding the minima,
-though the optimal values will form a Pareto set rather than a single point. Trieste provides
+though the optimal values will form a `Pareto set <https://en.wikipedia.org/wiki/Pareto_front>`_ rather than a single point. Trieste provides
 functionality for optimization of single-valued objective functions, and supports extension to the
 higher-dimensional case. It also supports optimization over constrained spaces, learning the
 constraints alongside the objective.
@@ -44,7 +44,7 @@ To install Trieste, run
 
    $ pip install trieste
 
-The library supports Python 3.7 onwards, and uses `semantic versioning <https://semver.org/>`_.
+The library supports Python 3.9 onwards, and uses `semantic versioning <https://semver.org/>`_.
 
 Getting help
 ------------
@@ -69,3 +69,9 @@ Getting help
    :hidden:
 
    Tutorials <tutorials>
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+
+   Bibliography <bibliography>

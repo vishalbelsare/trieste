@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 
@@ -84,6 +86,40 @@ def sample_with_replacement(dataset: Dataset) -> Dataset:
     query_points = tf.gather(dataset.query_points, index_tensor, axis=0)
 
     return Dataset(query_points=query_points, observations=observations)
+
+
+def sample_model_index(
+    size: TensorType,
+    num_samples: TensorType,
+    seed: Optional[int] = None,
+) -> TensorType:
+    """
+    Returns samples of indices of individual models in the ensemble.
+
+    If ``num_samples`` is smaller or equal to ``size`` (i.e. the ensemble size) indices are sampled
+    without replacement. When ``num_samples`` is larger than ``size`` then until ``size`` is reached
+    we sample without replacement, while after that we sample with replacement. The rationale of
+    this mixed scheme is that typically one wants to exhaust all networks and then resample them
+    only if required.
+
+    :param size: The maximum index, effectively the number of models in the ensemble.
+    :param num_samples: The number of samples to take.
+    :param seed: Optional RNG seed.
+    :return: A tensor with indices.
+    """
+    shuffle_indices = tf.random.shuffle(tf.range(size), seed=seed)
+    if num_samples > size:
+        random_indices = tf.random.uniform(
+            shape=(tf.cast(num_samples - size, tf.int32),),
+            maxval=size,
+            dtype=tf.int32,
+            seed=seed,
+        )
+        indices = tf.concat([shuffle_indices, random_indices], 0)
+    else:
+        indices = shuffle_indices[:num_samples]
+
+    return indices
 
 
 def negative_log_likelihood(

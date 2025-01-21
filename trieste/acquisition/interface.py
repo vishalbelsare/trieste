@@ -22,7 +22,7 @@ from typing import Callable, Generic, Mapping, Optional
 
 from ..data import Dataset
 from ..models.interfaces import ProbabilisticModelType
-from ..types import TensorType
+from ..types import Tag, TensorType
 
 AcquisitionFunction = Callable[[TensorType], TensorType]
 """
@@ -55,8 +55,8 @@ class AcquisitionFunctionBuilder(Generic[ProbabilisticModelType], ABC):
     @abstractmethod
     def prepare_acquisition_function(
         self,
-        models: Mapping[str, ProbabilisticModelType],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, ProbabilisticModelType],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
     ) -> AcquisitionFunction:
         """
         Prepare an acquisition function. We assume that this requires at least models, but
@@ -70,8 +70,8 @@ class AcquisitionFunctionBuilder(Generic[ProbabilisticModelType], ABC):
     def update_acquisition_function(
         self,
         function: AcquisitionFunction,
-        models: Mapping[str, ProbabilisticModelType],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, ProbabilisticModelType],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
     ) -> AcquisitionFunction:
         """
         Update an acquisition function. By default this generates a new acquisition function each
@@ -93,38 +93,42 @@ class SingleModelAcquisitionBuilder(Generic[ProbabilisticModelType], ABC):
     composite acquisition function) that requires only one model, dataset pair.
     """
 
-    def using(self, tag: str) -> AcquisitionFunctionBuilder[ProbabilisticModelType]:
+    def using(self, tag: Tag) -> AcquisitionFunctionBuilder[ProbabilisticModelType]:
         """
         :param tag: The tag for the model, dataset pair to use to build this acquisition function.
         :return: An acquisition function builder that selects the model and dataset specified by
             ``tag``, as defined in :meth:`prepare_acquisition_function`.
         """
-        single_builder = self
 
         class _Anon(AcquisitionFunctionBuilder[ProbabilisticModelType]):
+            def __init__(
+                self, single_builder: SingleModelAcquisitionBuilder[ProbabilisticModelType]
+            ):
+                self.single_builder = single_builder
+
             def prepare_acquisition_function(
                 self,
-                models: Mapping[str, ProbabilisticModelType],
-                datasets: Optional[Mapping[str, Dataset]] = None,
+                models: Mapping[Tag, ProbabilisticModelType],
+                datasets: Optional[Mapping[Tag, Dataset]] = None,
             ) -> AcquisitionFunction:
-                return single_builder.prepare_acquisition_function(
+                return self.single_builder.prepare_acquisition_function(
                     models[tag], dataset=None if datasets is None else datasets[tag]
                 )
 
             def update_acquisition_function(
                 self,
                 function: AcquisitionFunction,
-                models: Mapping[str, ProbabilisticModelType],
-                datasets: Optional[Mapping[str, Dataset]] = None,
+                models: Mapping[Tag, ProbabilisticModelType],
+                datasets: Optional[Mapping[Tag, Dataset]] = None,
             ) -> AcquisitionFunction:
-                return single_builder.update_acquisition_function(
+                return self.single_builder.update_acquisition_function(
                     function, models[tag], dataset=None if datasets is None else datasets[tag]
                 )
 
             def __repr__(self) -> str:
-                return f"{single_builder!r} using tag {tag!r}"
+                return f"{self.single_builder!r} using tag {tag!r}"
 
-        return _Anon()
+        return _Anon(self)
 
     @abstractmethod
     def prepare_acquisition_function(
@@ -167,8 +171,8 @@ class GreedyAcquisitionFunctionBuilder(Generic[ProbabilisticModelType], ABC):
     @abstractmethod
     def prepare_acquisition_function(
         self,
-        models: Mapping[str, ProbabilisticModelType],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, ProbabilisticModelType],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
         pending_points: Optional[TensorType] = None,
     ) -> AcquisitionFunction:
         """
@@ -186,8 +190,8 @@ class GreedyAcquisitionFunctionBuilder(Generic[ProbabilisticModelType], ABC):
     def update_acquisition_function(
         self,
         function: AcquisitionFunction,
-        models: Mapping[str, ProbabilisticModelType],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, ProbabilisticModelType],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
         pending_points: Optional[TensorType] = None,
         new_optimization_step: bool = True,
     ) -> AcquisitionFunction:
@@ -218,22 +222,26 @@ class SingleModelGreedyAcquisitionBuilder(Generic[ProbabilisticModelType], ABC):
     composite greedy acquisition function) that requires only one model, dataset pair.
     """
 
-    def using(self, tag: str) -> GreedyAcquisitionFunctionBuilder[ProbabilisticModelType]:
+    def using(self, tag: Tag) -> GreedyAcquisitionFunctionBuilder[ProbabilisticModelType]:
         """
         :param tag: The tag for the model, dataset pair to use to build this acquisition function.
         :return: An acquisition function builder that selects the model and dataset specified by
             ``tag``, as defined in :meth:`prepare_acquisition_function`.
         """
-        single_builder = self
 
         class _Anon(GreedyAcquisitionFunctionBuilder[ProbabilisticModelType]):
+            def __init__(
+                self, single_builder: SingleModelGreedyAcquisitionBuilder[ProbabilisticModelType]
+            ):
+                self.single_builder = single_builder
+
             def prepare_acquisition_function(
                 self,
-                models: Mapping[str, ProbabilisticModelType],
-                datasets: Optional[Mapping[str, Dataset]] = None,
+                models: Mapping[Tag, ProbabilisticModelType],
+                datasets: Optional[Mapping[Tag, Dataset]] = None,
                 pending_points: Optional[TensorType] = None,
             ) -> AcquisitionFunction:
-                return single_builder.prepare_acquisition_function(
+                return self.single_builder.prepare_acquisition_function(
                     models[tag],
                     dataset=None if datasets is None else datasets[tag],
                     pending_points=pending_points,
@@ -242,12 +250,12 @@ class SingleModelGreedyAcquisitionBuilder(Generic[ProbabilisticModelType], ABC):
             def update_acquisition_function(
                 self,
                 function: AcquisitionFunction,
-                models: Mapping[str, ProbabilisticModelType],
-                datasets: Optional[Mapping[str, Dataset]] = None,
+                models: Mapping[Tag, ProbabilisticModelType],
+                datasets: Optional[Mapping[Tag, Dataset]] = None,
                 pending_points: Optional[TensorType] = None,
                 new_optimization_step: bool = True,
             ) -> AcquisitionFunction:
-                return single_builder.update_acquisition_function(
+                return self.single_builder.update_acquisition_function(
                     function,
                     models[tag],
                     dataset=None if datasets is None else datasets[tag],
@@ -256,9 +264,9 @@ class SingleModelGreedyAcquisitionBuilder(Generic[ProbabilisticModelType], ABC):
                 )
 
             def __repr__(self) -> str:
-                return f"{single_builder!r} using tag {tag!r}"
+                return f"{self.single_builder!r} using tag {tag!r}"
 
-        return _Anon()
+        return _Anon(self)
 
     @abstractmethod
     def prepare_acquisition_function(
@@ -318,38 +326,43 @@ class SingleModelVectorizedAcquisitionBuilder(
     of a composite vectorized acquisition function) that requires only one model, dataset pair.
     """
 
-    def using(self, tag: str) -> AcquisitionFunctionBuilder[ProbabilisticModelType]:
+    def using(self, tag: Tag) -> AcquisitionFunctionBuilder[ProbabilisticModelType]:
         """
         :param tag: The tag for the model, dataset pair to use to build this acquisition function.
         :return: An acquisition function builder that selects the model and dataset specified by
             ``tag``, as defined in :meth:`prepare_acquisition_function`.
         """
-        single_builder = self
 
         class _Anon(VectorizedAcquisitionFunctionBuilder[ProbabilisticModelType]):
+            def __init__(
+                self,
+                single_builder: SingleModelVectorizedAcquisitionBuilder[ProbabilisticModelType],
+            ):
+                self.single_builder = single_builder
+
             def prepare_acquisition_function(
                 self,
-                models: Mapping[str, ProbabilisticModelType],
-                datasets: Optional[Mapping[str, Dataset]] = None,
+                models: Mapping[Tag, ProbabilisticModelType],
+                datasets: Optional[Mapping[Tag, Dataset]] = None,
             ) -> AcquisitionFunction:
-                return single_builder.prepare_acquisition_function(
+                return self.single_builder.prepare_acquisition_function(
                     models[tag], dataset=None if datasets is None else datasets[tag]
                 )
 
             def update_acquisition_function(
                 self,
                 function: AcquisitionFunction,
-                models: Mapping[str, ProbabilisticModelType],
-                datasets: Optional[Mapping[str, Dataset]] = None,
+                models: Mapping[Tag, ProbabilisticModelType],
+                datasets: Optional[Mapping[Tag, Dataset]] = None,
             ) -> AcquisitionFunction:
-                return single_builder.update_acquisition_function(
+                return self.single_builder.update_acquisition_function(
                     function, models[tag], dataset=None if datasets is None else datasets[tag]
                 )
 
             def __repr__(self) -> str:
-                return f"{single_builder!r} using tag {tag!r}"
+                return f"{self.single_builder!r} using tag {tag!r}"
 
-        return _Anon()
+        return _Anon(self)
 
 
 PenalizationFunction = Callable[[TensorType], TensorType]

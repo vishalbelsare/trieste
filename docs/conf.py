@@ -29,6 +29,7 @@
 # sys.path.insert(0, os.path.abspath('../'))
 
 # -- Project information -----------------------------------------------------
+from pathlib import Path
 
 project = "trieste"
 # fmt: off
@@ -51,7 +52,7 @@ copyright = (
 author = "The Trieste Contributors"
 
 # The full version, including alpha/beta/rc tags
-release = "0.9.0"
+release = Path("../trieste/VERSION").read_text().strip()
 
 # -- General configuration ---------------------------------------------------
 
@@ -76,6 +77,9 @@ autoapi_options = [
     "imported-members",
     "show-inheritance",
 ]
+
+# TODO: remove once https://github.com/sphinx-doc/sphinx/issues/4961 is fixed
+suppress_warnings = ["ref.python"]
 
 # intersphinx
 extensions.append("sphinx.ext.intersphinx")
@@ -111,6 +115,7 @@ html_theme = "pydata_sphinx_theme"
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
+html_css_files = ["css/custom.css"]
 
 # library logo location
 html_logo = "_static/logo.png"
@@ -122,4 +127,9 @@ html_show_sourcelink = False
 html_theme_options = {
     "show_prev_next": False,
     "github_url": "https://github.com/secondmind-labs/trieste",
+    "switcher": {
+        "json_url": "https://secondmind-labs.github.io/trieste/versions.json",
+        "version_match": release,
+    },
+    "navbar_end": ["version-switcher", "navbar-icon-links"],
 }
