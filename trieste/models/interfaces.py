@@ -15,13 +15,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, Optional, Sequence, TypeVar, overload
 
 import gpflow
 import tensorflow as tf
-from typing_extensions import Protocol, runtime_checkable
+from check_shapes import check_shapes, inherit_check_shapes
+from typing_extensions import Protocol, final, runtime_checkable
 
 from ..data import Dataset
+from ..space import EncoderFunction
 from ..types import TensorType
 from ..utils import DEFAULTS
 
@@ -45,6 +47,11 @@ class ProbabilisticModel(Protocol):
     """
 
     @abstractmethod
+    @check_shapes(
+        "query_points: [batch..., D]",
+        "return[0]: [batch..., E...]",
+        "return[1]: [batch..., E...]",
+    )
     def predict(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
         """
         Return the mean and variance of the independent marginal distributions at each point in
@@ -62,6 +69,10 @@ class ProbabilisticModel(Protocol):
         raise NotImplementedError
 
     @abstractmethod
+    @check_shapes(
+        "query_points: [batch..., N, D]",
+        "return: [batch..., S, N, E...]",
+    )
     def sample(self, query_points: TensorType, num_samples: int) -> TensorType:
         """
         Return ``num_samples`` samples from the independent marginal distributions at
@@ -74,27 +85,14 @@ class ProbabilisticModel(Protocol):
         """
         raise NotImplementedError
 
-    def predict_y(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
-        """
-        Return the mean and variance of the independent marginal distributions at each point in
-        ``query_points`` for the observations, including noise contributions.
-
-        Note that this is not supported by all models.
-
-        :param query_points: The points at which to make predictions, of shape [..., D].
-        :return: The mean and variance of the independent marginal distributions at each point in
-            ``query_points``. For a predictive distribution with event shape E, the mean and
-            variance will both have shape [...] + E.
-        """
-        raise NotImplementedError(
-            f"Model {self!r} does not support predicting observations, just the latent function"
-        )
-
-    def log(self) -> None:
+    @abstractmethod
+    def log(self, dataset: Optional[Dataset] = None) -> None:
         """
         Log model-specific information at a given optimization step.
+
+        :param dataset: Optional data that can be used to log additional data-based model summaries.
         """
-        pass
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -111,12 +109,13 @@ class TrainableProbabilisticModel(ProbabilisticModel, Protocol):
         raise NotImplementedError
 
     @abstractmethod
-    def optimize(self, dataset: Dataset) -> None:
+    def optimize(self, dataset: Dataset) -> Any:
         """
         Optimize the model objective with respect to (hyper)parameters given the specified
         ``dataset``.
 
         :param dataset: The data with which to train the model.
+        :return: Any (optimizer-specific) optimization result.
         """
         raise NotImplementedError
 
@@ -126,12 +125,40 @@ class SupportsPredictJoint(ProbabilisticModel, Protocol):
     """A probabilistic model that supports predict_joint."""
 
     @abstractmethod
+    @check_shapes(
+        "query_points: [batch..., B, D]",
+        "return[0]: [batch..., B, E...]",
+        "return[1]: [batch..., E..., B, B]",
+    )
     def predict_joint(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
         """
         :param query_points: The points at which to make predictions, of shape [..., B, D].
         :return: The mean and covariance of the joint marginal distribution at each batch of points
             in ``query_points``. For a predictive distribution with event shape E, the mean will
             have shape [..., B] + E, and the covariance shape [...] + E + [B, B].
+        """
+        raise NotImplementedError
+
+
+@runtime_checkable
+class SupportsPredictY(ProbabilisticModel, Protocol):
+    """A probabilistic model that supports predict_y."""
+
+    @abstractmethod
+    @check_shapes(
+        "query_points: [broadcast batch..., D]",
+        "return[0]: [batch..., E...]",
+        "return[1]: [batch..., E...]",
+    )
+    def predict_y(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        """
+        Return the mean and variance of the independent marginal distributions at each point in
+        ``query_points`` for the observations, including noise contributions.
+
+        :param query_points: The points at which to make predictions, of shape [..., D].
+        :return: The mean and variance of the independent marginal distributions at each point in
+            ``query_points``. For a predictive distribution with event shape E, the mean and
+            variance will both have shape [...] + E.
         """
         raise NotImplementedError
 
@@ -150,6 +177,11 @@ class SupportsGetKernel(ProbabilisticModel, Protocol):
 
 
 @runtime_checkable
+class TrainableSupportsGetKernel(TrainableProbabilisticModel, SupportsGetKernel, Protocol):
+    """A trainable probabilistic model that supports get_kernel."""
+
+
+@runtime_checkable
 class SupportsGetObservationNoise(ProbabilisticModel, Protocol):
     """A probabilistic model that supports get_observation_noise."""
 
@@ -164,7 +196,7 @@ class SupportsGetObservationNoise(ProbabilisticModel, Protocol):
 
 
 @runtime_checkable
-class SupportsInternalData(ProbabilisticModel, Protocol):
+class SupportsGetInternalData(ProbabilisticModel, Protocol):
     """A probabilistic model that stores and has access to its own training data."""
 
     @abstractmethod
@@ -173,6 +205,22 @@ class SupportsInternalData(ProbabilisticModel, Protocol):
         Return the model's training data.
 
         :return: The model's training data.
+        """
+        raise NotImplementedError
+
+
+@runtime_checkable
+class SupportsGetMeanFunction(ProbabilisticModel, Protocol):
+    """A probabilistic model that makes use of a mean function."""
+
+    @abstractmethod
+    def get_mean_function(self) -> Callable[[TensorType], TensorType]:
+        """
+        Return the model's mean function, i.e. a parameterized function that can explain
+        coarse scale variations in the data, leaving just the residuals to be explained by
+        our model.
+
+        :return: The model's mean function.
         """
         raise NotImplementedError
 
@@ -249,59 +297,6 @@ class FastUpdateModel(ProbabilisticModel, Protocol):
 
 
 @runtime_checkable
-class EnsembleModel(ProbabilisticModel, Protocol):
-    """
-    This is an interface for ensemble types of models. These models can act as probabilistic models
-    by deriving estimates of epistemic uncertainty from the diversity of predictions made by
-    individual models in the ensemble.
-    """
-
-    @abstractmethod
-    def ensemble_size(self) -> int:
-        """
-        Returns the size of the ensemble, that is, the number of base learners or individual
-        models in the ensemble.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def sample_index(self, size: int) -> TensorType:
-        """
-        Returns indices of individual models in the ensemble sampled randomly with replacement.
-
-        :param size: The number of samples to take.
-        :return: A tensor with indices
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def predict_ensemble(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
-        """
-        Returns mean and variance at ``query_points`` for each member of the ensemble. First tensor
-        is the mean and second is the variance, where each has shape [..., M, N, 1], where M is
-        the ``ensemble_size``.
-
-        :param query_points: The points at which to make predictions.
-        :return: The predicted mean and variance of the observations at the specified
-            ``query_points`` for each member of the ensemble.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def sample_ensemble(self, query_points: TensorType, num_samples: int) -> TensorType:
-        """
-        Return ``num_samples`` samples at ``query_points`` where each sample is taken from a
-        distribution given by a randomly chosen model in the ensemble.
-
-        :param query_points: The points at which to sample, with shape [..., N, D].
-        :param num_samples: The number of samples at each point.
-        :return: The samples. For a predictive distribution with event shape E, this has shape
-            [..., S, N] + E, where S is the number of samples.
-        """
-        raise NotImplementedError
-
-
-@runtime_checkable
 class HasTrajectorySampler(ProbabilisticModel, Protocol):
     """A probabilistic model that has an associated trajectory sampler."""
 
@@ -330,6 +325,13 @@ class HasReparamSampler(ProbabilisticModel, Protocol):
         :return: The reparametrization sampler.
         """
         raise NotImplementedError
+
+
+@runtime_checkable
+class SupportsReparamSamplerObservationNoise(
+    HasReparamSampler, SupportsGetObservationNoise, Protocol
+):
+    """A model that supports both reparam_sampler and get_observation_noise."""
 
 
 class ModelStack(ProbabilisticModel, Generic[ProbabilisticModelType]):
@@ -361,8 +363,10 @@ class ModelStack(ProbabilisticModel, Generic[ProbabilisticModelType]):
             method signature requires at least one model. It is not treated specially.
         :param \*models_with_event_sizes: The other models, and sizes of their output events.
         """
-        super().__init__()
         self._models, self._event_sizes = zip(*(model_with_event_size,) + models_with_event_sizes)
+
+    # NB we don't use @inherit_shapes below as some classes break the shape API (👀 fantasizer)
+    # instead we rely on the shape checking inside the submodels
 
     def predict(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
         r"""
@@ -386,25 +390,15 @@ class ModelStack(ProbabilisticModel, Generic[ProbabilisticModelType]):
         samples = [model.sample(query_points, num_samples) for model in self._models]
         return tf.concat(samples, axis=-1)
 
-    def predict_y(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
-        r"""
-        :param query_points: The points at which to make predictions, of shape [..., D].
-        :return: The predictions from all the wrapped models, concatenated along the event axis in
-            the same order as they appear in :meth:`__init__`. If the wrapped models have predictive
-            distributions with event shapes [:math:`E_i`], the mean and variance will both have
-            shape [..., :math:`\sum_i E_i`].
-        :raise NotImplementedError: If any of the models don't implement predict_y.
-        """
-        means, vars_ = zip(*[model.predict_y(query_points) for model in self._models])
-        return tf.concat(means, axis=-1), tf.concat(vars_, axis=-1)
-
-    def log(self) -> None:
+    def log(self, dataset: Optional[Dataset] = None) -> None:
         """
         Log model-specific information at a given optimization step.
+
+        :param dataset: Optional data that can be used to log additional data-based model summaries.
         """
         for i, model in enumerate(self._models):
             with tf.name_scope(f"{i}"):
-                model.log()
+                model.log(dataset)
 
 
 class TrainableModelStack(ModelStack[TrainableProbabilisticModel], TrainableProbabilisticModel):
@@ -431,7 +425,7 @@ class TrainableModelStack(ModelStack[TrainableProbabilisticModel], TrainableProb
         for model, obs in zip(self._models, observations):
             model.update(Dataset(dataset.query_points, obs))
 
-    def optimize(self, dataset: Dataset) -> None:
+    def optimize(self, dataset: Dataset) -> Sequence[Any]:
         """
         Optimize all the wrapped models on their corresponding data. The data for each model is
         extracted by splitting the observations in ``dataset`` along the event axis according to the
@@ -440,9 +434,12 @@ class TrainableModelStack(ModelStack[TrainableProbabilisticModel], TrainableProb
         :param dataset: The query points and observations for *all* the wrapped models.
         """
         observations = tf.split(dataset.observations, self._event_sizes, axis=-1)
+        results = []
 
         for model, obs in zip(self._models, observations):
-            model.optimize(Dataset(dataset.query_points, obs))
+            results.append(model.optimize(Dataset(dataset.query_points, obs)))
+
+        return results
 
 
 class HasReparamSamplerModelStack(ModelStack[HasReparamSampler], HasReparamSampler):
@@ -502,11 +499,29 @@ class PredictJointModelStack(ModelStack[SupportsPredictJoint], SupportsPredictJo
         return tf.concat(means, axis=-1), tf.concat(covs, axis=-3)
 
 
+class PredictYModelStack(ModelStack[SupportsPredictY], SupportsPredictY):
+    r"""
+    A :class:`PredictYModelStack` is a wrapper around a number of
+    :class:`SupportsPredictY`\ s.
+    It delegates :meth:`predict_y` to each model.
+    """
+
+    def predict_y(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        r"""
+        :param query_points: The points at which to make predictions, of shape [..., D].
+        :return: The predictions from all the wrapped models, concatenated along the event axis in
+            the same order as they appear in :meth:`__init__`. If the wrapped models have predictive
+            distributions with event shapes [:math:`E_i`], the mean and variance will both have
+            shape [..., :math:`\sum_i E_i`].
+        :raise NotImplementedError: If any of the models don't implement predict_y.
+        """
+        means, vars_ = zip(*[model.predict_y(query_points) for model in self._models])
+        return tf.concat(means, axis=-1), tf.concat(vars_, axis=-1)
+
+
 # It's useful, though a bit ugly, to define the stack constructors for some model type combinations
 class TrainableSupportsPredictJoint(TrainableProbabilisticModel, SupportsPredictJoint, Protocol):
     """A model that is both trainable and supports predict_joint."""
-
-    pass
 
 
 class TrainablePredictJointModelStack(
@@ -514,15 +529,31 @@ class TrainablePredictJointModelStack(
 ):
     """A stack of models that are both trainable and support predict_joint."""
 
-    pass
+
+class TrainableSupportsPredictY(TrainableProbabilisticModel, SupportsPredictY, Protocol):
+    """A model that is both trainable and supports predict_y."""
+
+
+class TrainablePredictYModelStack(
+    TrainableModelStack, PredictYModelStack, ModelStack[TrainableSupportsPredictY]
+):
+    """A stack of models that are both trainable and support predict_y."""
+
+
+class SupportsPredictJointPredictY(SupportsPredictJoint, SupportsPredictY, Protocol):
+    """A model that supports both predict_joint and predict_y."""
+
+
+class PredictJointPredictYModelStack(
+    PredictJointModelStack, PredictYModelStack, ModelStack[SupportsPredictJointPredictY]
+):
+    """A stack of models that support both predict_joint and predict_y."""
 
 
 class TrainableSupportsPredictJointHasReparamSampler(
     TrainableSupportsPredictJoint, HasReparamSampler, Protocol
 ):
     """A model that is trainable, supports predict_joint and has a reparameterization sampler."""
-
-    pass
 
 
 class TrainablePredictJointReparamModelStack(
@@ -531,8 +562,6 @@ class TrainablePredictJointReparamModelStack(
     ModelStack[TrainableSupportsPredictJointHasReparamSampler],
 ):
     """A stack of models that are both trainable and support predict_joint."""
-
-    pass
 
 
 class ReparametrizationSampler(ABC, Generic[ProbabilisticModelType]):
@@ -565,10 +594,12 @@ class ReparametrizationSampler(ABC, Generic[ProbabilisticModelType]):
     @abstractmethod
     def sample(self, at: TensorType, *, jitter: float = DEFAULTS.JITTER) -> TensorType:
         """
-        :param at: Input points that define the sampler of shape `[N, D]`.
-        :param jitter: The size of the jitter to use when stabilizing the Cholesky
-            decomposition of the covariance matrix.
-        :return: Samples of shape `[sample_size, D]`.
+        :param at: Where to sample the predictive distribution, with shape `[..., 1, D]`, for points
+            of dimension `D`.
+        :param jitter: The size of the jitter to use when stabilising the Cholesky decomposition of
+            the covariance matrix.
+        :return: The samples, of shape `[..., S, B, L]`, where `S` is the `sample_size`, `B` is
+            the number of points per batch, and `L` is the number of latent model dimensions.
         """
 
         raise NotImplementedError
@@ -582,12 +613,13 @@ class ReparametrizationSampler(ABC, Generic[ProbabilisticModelType]):
 
 TrajectoryFunction = Callable[[TensorType], TensorType]
 """
-Type alias for trajectory functions. These have essentially the same behavior as an
-:const:`AcquisitionFunction` but have additional sampling properties.
+Type alias for trajectory functions. These have similar behaviour to an :const:`AcquisitionFunction`
+but have additional sampling properties and support multiple model outputs.
 
-An :const:`TrajectoryFunction` evaluates a particular sample at a set of `N` query
-points (each of dimension `D`) i.e. takes input of shape `[N, 1, D]` and returns
-shape `[N, 1]`.
+An :const:`TrajectoryFunction` evaluates a batch of `B` samples, each across different sets
+of `N` query points (of dimension `D`) i.e. takes input of shape `[N, B, D]` and returns
+shape `[N, B, L]`, where `L` is the number of outputs of the model. Note that we require the `L`
+dimension to be present, even if there is only one output.
 
 A key property of these trajectory functions is that the same sample draw is evaluated
 for all queries. This property is known as consistency.
@@ -629,8 +661,14 @@ class TrajectorySampler(ABC, Generic[ProbabilisticModelType]):
     @abstractmethod
     def get_trajectory(self) -> TrajectoryFunction:
         """
+        Sample a batch of `B` trajectories. Note that the batch size `B` is determined
+        by the first call of the :const:`TrajectoryFunction`. To change the batch size
+        of a :const:`TrajectoryFunction` after initialization, you must
+        recall :meth:`get_trajectory`.
+
         :return: A trajectory function representing an approximate trajectory
-            from the model, taking an input of shape `[N, 1, D]` and returning shape `[N, 1]`.
+            from the model, taking an input of shape `[N, B, D]` and returning shape `[N, B, L]`,
+            where `L` is the number of outputs of the model.
         """
         raise NotImplementedError
 
@@ -662,3 +700,212 @@ class TrajectorySampler(ABC, Generic[ProbabilisticModelType]):
         :return: The new trajectory function updated for a new model
         """
         return self.get_trajectory()
+
+
+@runtime_checkable
+class SupportsGetInducingVariables(ProbabilisticModel, Protocol):
+    """A probabilistic model uses and has access to an inducing point approximation."""
+
+    @abstractmethod
+    def get_inducing_variables(self) -> tuple[TensorType, TensorType, TensorType, bool]:
+        """
+        Return the model's inducing variables.
+
+        :return: Tensors containing: the inducing points (i.e. locations of the inducing
+            variables); the variational mean q_mu; the Cholesky decomposition of the
+            variational covariance q_sqrt; and a bool denoting if we are using whitened
+            or not whitened representations.
+        """
+        raise NotImplementedError
+
+
+@runtime_checkable
+class SupportsCovarianceWithTopFidelity(ProbabilisticModel, Protocol):
+    """A probabilistic model is multifidelity and has access to a method to calculate the
+    covariance between a point and the same point at the top fidelity"""
+
+    @property
+    @abstractmethod
+    def num_fidelities(self) -> int:
+        """
+        The number of fidelities
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def covariance_with_top_fidelity(self, query_points: TensorType) -> TensorType:
+        """
+        Calculate the covariance of the output at `query_point` and a given fidelity with the
+        highest fidelity output at the same `query_point`.
+
+        :param query_points: The query points to calculate the covariance for, of shape [N, D+1],
+            where the final column of the final dimension contains the fidelity of the query point
+        :return: The covariance with the top fidelity for the `query_points`, of shape [N, P]
+        """
+        raise NotImplementedError
+
+
+def encode_dataset(dataset: Dataset, encoder: EncoderFunction) -> Dataset:
+    """Return a new Dataset with the query points encoded using the given encoder."""
+    return Dataset(encoder(dataset.query_points), dataset.observations)
+
+
+class EncodedProbabilisticModel(ProbabilisticModel):
+    """A probabilistic model with an associated query point encoder.
+
+    Classes that inherit from this (or the other associated mixins below) should implement the
+    relevant _encoded methods (e.g. predict_encoded instead of predict), to which the public
+    methods delegate after encoding their input. Take care to use the correct methods internally
+    to avoid encoding twice accidentally.
+    """
+
+    @property
+    @abstractmethod
+    def encoder(self) -> EncoderFunction | None:
+        """Query point encoder."""
+
+    @overload
+    def encode(self, points: TensorType) -> TensorType: ...
+
+    @overload
+    def encode(self, points: Dataset) -> Dataset: ...
+
+    def encode(self, points: Dataset | TensorType) -> Dataset | TensorType:
+        """Encode points or a Dataset using the query point encoder."""
+        if self.encoder is None:
+            return points
+        elif isinstance(points, Dataset):
+            return encode_dataset(points, self.encoder)
+        else:
+            return self.encoder(points)
+
+    @abstractmethod
+    def predict_encoded(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        """Implementation of predict on encoded query points."""
+
+    @abstractmethod
+    def sample_encoded(self, query_points: TensorType, num_samples: int) -> TensorType:
+        """Implementation of sample on encoded query points."""
+
+    @final
+    @inherit_check_shapes
+    def predict(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        return self.predict_encoded(self.encode(query_points))
+
+    @final
+    @inherit_check_shapes
+    def sample(self, query_points: TensorType, num_samples: int) -> TensorType:
+        return self.sample_encoded(self.encode(query_points), num_samples)
+
+
+class EncodedTrainableProbabilisticModel(EncodedProbabilisticModel, TrainableProbabilisticModel):
+    """A trainable probabilistic model with an associated query point encoder."""
+
+    @abstractmethod
+    def update_encoded(self, dataset: Dataset) -> None:
+        """Implementation of update on the encoded dataset."""
+
+    @abstractmethod
+    def optimize_encoded(self, dataset: Dataset) -> Any:
+        """Implementation of optimize on the encoded dataset."""
+
+    @final
+    def update(self, dataset: Dataset) -> None:
+        return self.update_encoded(self.encode(dataset))
+
+    @final
+    def optimize(self, dataset: Dataset) -> Any:
+        return self.optimize_encoded(self.encode(dataset))
+
+
+class EncodedSupportsPredictJoint(EncodedProbabilisticModel, SupportsPredictJoint):
+    """A probabilistic model that supports predict_joint with an associated query point encoder."""
+
+    @abstractmethod
+    def predict_joint_encoded(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        """Implementation of predict_joint on encoded query points."""
+
+    @final
+    @inherit_check_shapes
+    def predict_joint(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        return self.predict_joint_encoded(self.encode(query_points))
+
+
+class EncodedSupportsPredictY(EncodedProbabilisticModel, SupportsPredictY):
+    """A probabilistic model that supports predict_y with an associated query point encoder."""
+
+    @abstractmethod
+    def predict_y_encoded(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        """Implementation of predict_y on encoded query points."""
+
+    @final
+    @inherit_check_shapes
+    def predict_y(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
+        return self.predict_y_encoded(self.encode(query_points))
+
+
+class EncodedFastUpdateModel(EncodedProbabilisticModel, FastUpdateModel):
+    """A fast update model with an associated query point encoder."""
+
+    @abstractmethod
+    def conditional_predict_f_encoded(
+        self, query_points: TensorType, additional_data: Dataset
+    ) -> tuple[TensorType, TensorType]:
+        """Implementation of conditional_predict_f on encoded query points."""
+
+    @abstractmethod
+    def conditional_predict_joint_encoded(
+        self, query_points: TensorType, additional_data: Dataset
+    ) -> tuple[TensorType, TensorType]:
+        """Implementation of conditional_predict_joint on encoded query points."""
+
+    @abstractmethod
+    def conditional_predict_f_sample_encoded(
+        self, query_points: TensorType, additional_data: Dataset, num_samples: int
+    ) -> TensorType:
+        """Implementation of conditional_predict_f_sample on encoded query points."""
+
+    @abstractmethod
+    def conditional_predict_y_encoded(
+        self, query_points: TensorType, additional_data: Dataset
+    ) -> tuple[TensorType, TensorType]:
+        """Implementation of conditional_predict_y on encoded query points."""
+
+    @final
+    def conditional_predict_f(
+        self, query_points: TensorType, additional_data: Dataset
+    ) -> tuple[TensorType, TensorType]:
+        return self.conditional_predict_f_encoded(
+            self.encode(query_points), self.encode(additional_data)
+        )
+
+    @final
+    def conditional_predict_joint(
+        self, query_points: TensorType, additional_data: Dataset
+    ) -> tuple[TensorType, TensorType]:
+        return self.conditional_predict_joint_encoded(
+            self.encode(query_points), self.encode(additional_data)
+        )
+
+    @final
+    def conditional_predict_f_sample(
+        self, query_points: TensorType, additional_data: Dataset, num_samples: int
+    ) -> TensorType:
+        return self.conditional_predict_f_sample_encoded(
+            self.encode(query_points), self.encode(additional_data), num_samples
+        )
+
+    @final
+    def conditional_predict_y(
+        self, query_points: TensorType, additional_data: Dataset
+    ) -> tuple[TensorType, TensorType]:
+        return self.conditional_predict_y_encoded(
+            self.encode(query_points), self.encode(additional_data)
+        )
+
+
+def get_encoder(model: ProbabilisticModel) -> EncoderFunction | None:
+    """Helper function for getting an encoder from model (which may or may not have one)."""
+    if isinstance(model, EncodedProbabilisticModel):
+        return model.encoder
+    return None

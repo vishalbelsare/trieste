@@ -15,17 +15,17 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Optional
+from typing import Callable, Optional
 
 import tensorflow as tf
 
 from ..data import Dataset
-from ..models import ProbabilisticModel
-from ..types import TensorType
+from ..models import ProbabilisticModelType
+from ..types import Tag, TensorType
 from .interface import AcquisitionFunction, AcquisitionFunctionBuilder
 
 
-class Reducer(AcquisitionFunctionBuilder[ProbabilisticModel]):
+class Reducer(AcquisitionFunctionBuilder[ProbabilisticModelType]):
     r"""
     A :class:`Reducer` builds an :const:`~trieste.acquisition.AcquisitionFunction` whose output is
     calculated from the outputs of a number of other
@@ -33,7 +33,7 @@ class Reducer(AcquisitionFunctionBuilder[ProbabilisticModel]):
     by the method :meth:`_reduce`.
     """
 
-    def __init__(self, *builders: AcquisitionFunctionBuilder[ProbabilisticModel]):
+    def __init__(self, *builders: AcquisitionFunctionBuilder[ProbabilisticModelType]):
         r"""
         :param \*builders: Acquisition function builders. At least one must be provided.
         :raise `~tf.errors.InvalidArgumentError`: If no builders are specified.
@@ -44,13 +44,15 @@ class Reducer(AcquisitionFunctionBuilder[ProbabilisticModel]):
 
         self._acquisitions = builders
 
-    def _repr_builders(self) -> str:
-        return ", ".join(map(repr, self._acquisitions))
+    def __repr__(self) -> str:
+        """"""
+        builders = ", ".join(map(repr, self._acquisitions))
+        return f"{self.__class__.__name__}({builders})"
 
     def prepare_acquisition_function(
         self,
-        models: Mapping[str, ProbabilisticModel],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, ProbabilisticModelType],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
     ) -> AcquisitionFunction:
         r"""
         Return an acquisition function. This acquisition function is defined by first building
@@ -63,19 +65,38 @@ class Reducer(AcquisitionFunctionBuilder[ProbabilisticModel]):
         :param models: The models over each dataset in ``datasets``.
         :return: The reduced acquisition function.
         """
-        functions = tuple(
+        self.functions = tuple(
             acq.prepare_acquisition_function(models, datasets=datasets) for acq in self.acquisitions
         )
 
         def evaluate_acquisition_function_fn(at: TensorType) -> TensorType:
-            return self._reduce_acquisition_functions(at, functions)
+            return self._reduce_acquisition_functions(at, self.functions)
 
         return evaluate_acquisition_function_fn
 
-    # TODO: define update_acquisition_function to avoid unnecessary retracing
+    def update_acquisition_function(
+        self,
+        function: AcquisitionFunction,
+        models: Mapping[Tag, ProbabilisticModelType],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
+    ) -> AcquisitionFunction:
+        """
+        :param function: The acquisition function to update.
+        :param models: The model.
+        :param datasets: Unused.
+        """
+        self.functions = tuple(
+            acq.update_acquisition_function(function, models, datasets=datasets)
+            for function, acq in zip(self.functions, self.acquisitions)
+        )
+
+        def evaluate_acquisition_function_fn(at: TensorType) -> TensorType:
+            return self._reduce_acquisition_functions(at, self.functions)
+
+        return evaluate_acquisition_function_fn
 
     @property
-    def acquisitions(self) -> Sequence[AcquisitionFunctionBuilder[ProbabilisticModel]]:
+    def acquisitions(self) -> Sequence[AcquisitionFunctionBuilder[ProbabilisticModelType]]:
         """The acquisition function builders specified at class initialisation."""
         return self._acquisitions
 
@@ -93,15 +114,11 @@ class Reducer(AcquisitionFunctionBuilder[ProbabilisticModel]):
         raise NotImplementedError()
 
 
-class Sum(Reducer):
+class Sum(Reducer[ProbabilisticModelType]):
     """
     :class:`Reducer` whose resulting acquisition function returns the element-wise sum of the
     outputs of constituent acquisition functions.
     """
-
-    def __repr__(self) -> str:
-        """"""
-        return f"Sum({self._repr_builders()})"
 
     def _reduce(self, inputs: Sequence[TensorType]) -> TensorType:
         """
@@ -111,15 +128,11 @@ class Sum(Reducer):
         return tf.add_n(inputs)
 
 
-class Product(Reducer):
+class Product(Reducer[ProbabilisticModelType]):
     """
     :class:`Reducer` whose resulting acquisition function returns the element-wise product of the
     outputs of constituent acquisition functions.
     """
-
-    def __repr__(self) -> str:
-        """"""
-        return f"Product({self._repr_builders()})"
 
     def _reduce(self, inputs: Sequence[TensorType]) -> TensorType:
         """
@@ -127,3 +140,31 @@ class Product(Reducer):
         :return: The element-wise product of the ``inputs``.
         """
         return tf.reduce_prod(inputs, axis=0)
+
+
+class Map(Reducer[ProbabilisticModelType]):
+    """
+    :class:`Reducer` that accepts just one acquisition function builder and applies a
+    given function to its output. For example ``Map(lambda x: -x, builder)`` would generate
+    an acquisition function that returns the negative of the output of ``builder``.
+    """
+
+    def __init__(
+        self,
+        map_fn: Callable[[TensorType], TensorType],
+        builder: AcquisitionFunctionBuilder[ProbabilisticModelType],
+    ):
+        """
+        :param map_fn: Function to apply.
+        :param builder: Acquisition function builder.
+        """
+        super().__init__(builder)
+        self._map_fn = map_fn
+
+    def _reduce(self, inputs: Sequence[TensorType]) -> TensorType:
+        """
+        :param inputs: The outputs of the acquisition function.
+        :return: The result of applying the map function to ``inputs``.
+        """
+        tf.debugging.assert_equal(len(inputs), 1)
+        return self._map_fn(inputs[0])

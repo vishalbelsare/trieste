@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Asynchronous batch Bayesian optimization
+# # Asynchronous batch Bayesian Optimization
 #
 # As shown in [Asynchronous Bayesian Optimization](asynchronous_greedy_multiprocessing.ipynb) tutorial, Trieste provides support for running observations asynchronously. In that tutorial we used a greedy batch acquisition function called Local Penalization, and requested one new point whenever an observation was received. We also used the Python multiprocessing module to run distributed observations in parallel.
 #
@@ -11,6 +11,9 @@
 # silence TF warnings and info messages, only print errors
 # https://stackoverflow.com/questions/35911252/disable-tensorflow-debugging-information
 import os
+from pathlib import Path
+
+from ray.exceptions import LocalRayletDiedError
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import tensorflow as tf
@@ -25,7 +28,7 @@ import time
 # Just as in the other [notebook on asynchronous optimization](asynchronous_greedy_multiprocessing.ipynb), we use Branin function with delays.
 
 # %%
-from trieste.objectives import scaled_branin
+from trieste.objectives import ScaledBranin
 
 
 def objective(points, sleep=True):
@@ -36,7 +39,7 @@ def objective(points, sleep=True):
 
     observations = []
     for point in points:
-        observation = scaled_branin(point).numpy()
+        observation = ScaledBranin.objective(point).numpy()
         if sleep:
             # insert some artificial delay that
             # increases linearly with the absolute value of points
@@ -55,6 +58,7 @@ objective(np.array([[0.1, 0.5]]), sleep=False)
 
 # %% [markdown]
 # To turn our objective function into a Ray task, we wrap it in a function with appropriate decorator. We are not using anything beyond Ray tasks API in this tutorial, and refer interested readers to [Ray documentation](https://docs.ray.io/en/latest/walkthrough.html) and [Ray crash course](https://github.com/anyscale/academy/blob/main/ray-crash-course/01-Ray-Tasks.ipynb) for more details.
+
 
 # %%
 @ray.remote
@@ -95,7 +99,7 @@ model = GaussianProcessRegression(gpflow_model)
 # %%
 # Number of worker processes to run simultaneously
 # Setting this to 1 will reduce our optimization to non-batch sequential
-num_workers = 6
+num_workers = 4
 # Number of observations to collect
 num_observations = 30
 # Batch size of the acquisition function. We will wait for that many workers to return before launching a new batch
@@ -131,6 +135,7 @@ ray.init(ignore_reinit_error=True)
 points_observed = 0
 workers = []
 
+
 # a helper function to launch a worker for a numpy array representing a single point
 def launch_worker(x):
     worker = ray_objective.remote(np.atleast_2d(x), enable_sleep_delays)
@@ -153,11 +158,16 @@ while points_observed < num_observations:
 
     # we saw enough results to ask for a new batch
 
-    new_observations = [
-        observation
-        for worker in finished_workers
-        for observation in ray.get(worker)
-    ]
+    try:
+        new_observations = [
+            observation
+            for worker in finished_workers
+            for observation in ray.get(worker)
+        ]
+    except LocalRayletDiedError:
+        print("")
+        print("=======raylet.out=======")
+        print(Path("raylet.out").read_text())
 
     # new_observations is a list of tuples (point, observation value)
     # here we turn it into a Dataset and tell it to Trieste
@@ -182,17 +192,16 @@ while points_observed < num_observations:
 # Let's plot the objective function and the points the optimization procedure explored.
 
 # %%
-from util.plotting import plot_function_2d, plot_bo_points
+from trieste.experimental.plotting import plot_function_2d, plot_bo_points
 
 dataset = async_bo.to_result().try_get_final_dataset()
 arg_min_idx = tf.squeeze(tf.argmin(dataset.observations, axis=0))
 query_points = dataset.query_points.numpy()
 observations = dataset.observations.numpy()
 _, ax = plot_function_2d(
-    scaled_branin,
+    ScaledBranin.objective,
     search_space.lower,
     search_space.upper,
-    grid_density=30,
     contour=True,
 )
 

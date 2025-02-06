@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Bayesian active learning of failure or feasibility regions
+# # Active learning of feasibility regions
 #
 # When designing a system it is important to identify design parameters that may affect the reliability of the system and cause failures, or lead to unsatisfactory performance. Consider designing a communication network that for some design parameters would lead to too long delays for users. A designer of the system would then decide what is the maximum acceptable delay and want to identify a *failure region* in the parameter space that would lead to longer delays., or conversely, a *feasible region* with safe performance.
 #
@@ -35,14 +35,15 @@ tf.random.set_seed(1793)
 # We illustrate the thresholded Branin function below, you can note that above the threshold of 80 there are no more values observed.
 
 # %%
-from trieste.objectives import branin, BRANIN_SEARCH_SPACE
-from util.plotting_plotly import plot_function_plotly
-from trieste.space import Box
+from trieste.objectives import Branin
+from trieste.experimental.plotting import plot_function_plotly
 
-search_space = BRANIN_SEARCH_SPACE
+branin = Branin.objective
+search_space = Branin.search_space
 
 # threshold is arbitrary, but has to be within the range of the function
 threshold = 80.0
+
 
 # define a modified branin function
 def thresholded_branin(x):
@@ -53,9 +54,8 @@ def thresholded_branin(x):
 
 # illustrate the thresholded branin function
 fig = plot_function_plotly(
-    thresholded_branin, search_space.lower, search_space.upper, grid_density=700
+    thresholded_branin, search_space.lower, search_space.upper
 )
-fig.update_layout(height=800, width=800)
 fig.show()
 
 
@@ -127,7 +127,7 @@ result = bo.optimize(num_steps, initial_data, model, rule)
 # We first define helper functions for computing excursion probabilities and plotting, and then plot the thresholded Branin function as a reference. White area represents the failure region.
 
 # %%
-from util.plotting import plot_bo_points, plot_function_2d
+from trieste.experimental.plotting import plot_bo_points, plot_function_2d
 import tensorflow_probability as tfp
 
 
@@ -148,7 +148,6 @@ def excursion_probability(x, model, threshold=80):
 def plot_excursion_probability(
     title, model=None, query_points=None, threshold=80.0
 ):
-
     if model is None:
         objective_function = thresholded_branin
     else:
@@ -160,7 +159,6 @@ def plot_excursion_probability(
         objective_function,
         search_space.lower - 0.01,
         search_space.upper + 0.01,
-        grid_density=300,
         contour=True,
         colorbar=True,
         figsize=(10, 6),
@@ -193,9 +191,7 @@ initial_model.optimize(initial_data)
 plot_excursion_probability(
     "Probability of excursion, initial data",
     initial_model,
-    query_points[
-        :num_initial_points,
-    ],
+    query_points[:num_initial_points,],
 )
 
 

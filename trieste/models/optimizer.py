@@ -20,6 +20,7 @@ register their loss functions using a :func:`create_loss_function`.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from functools import singledispatch
 from typing import Any, Callable, Iterable, Optional, Tuple, Union
@@ -27,11 +28,11 @@ from typing import Any, Callable, Iterable, Optional, Tuple, Union
 import scipy
 import tensorflow as tf
 import tensorflow_probability as tfp
+from gpflow.keras import tf_keras
 
 from ..data import Dataset
 from ..types import TensorType
 from ..utils import jit
-from .interfaces import TrainableProbabilisticModel
 
 TrainingData = Union[Tuple[TensorType, TensorType], Iterable[Tuple[TensorType, TensorType]]]
 """ Type alias for a batch, or batches, of training data. """
@@ -151,34 +152,78 @@ class BatchOptimizer(Optimizer):
         for _ in range(self.max_iter):
             train_fn()
 
+    def __deepcopy__(self, memo: dict[int, object]) -> BatchOptimizer:
+        # workaround for https://github.com/tensorflow/tensorflow/issues/58973
+        # (keras optimizers not being deepcopyable in TF 2.11 and 2.12)
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            if (
+                k == "optimizer"
+                and isinstance(v, tf_keras.optimizers.Optimizer)
+                and hasattr(v, "_distribution_strategy")
+            ):
+                # avoid copying distribution strategy: reuse it instead
+                strategy = v._distribution_strategy
+                v._distribution_strategy = None
+                try:
+                    setattr(result, k, copy.deepcopy(v, memo))
+                finally:
+                    v._distribution_strategy = strategy
+                result.optimizer._distribution_strategy = strategy
+            else:
+                setattr(result, k, copy.deepcopy(v, memo))
+        return result
+
 
 @dataclass
 class KerasOptimizer:
-    """Optimizer wrapper for training neural network models implemented with Keras."""
+    """Optimizer wrapper for training models implemented with Keras."""
 
-    optimizer: tf.keras.optimizers.Optimizer
+    optimizer: tf_keras.optimizers.Optimizer
     """ The underlying optimizer to use for training the model. """
-
-    loss: Union[
-        tf.keras.losses.Loss, Callable[[TensorType, tfp.distributions.Distribution], TensorType]
-    ] = None
-    """ Defines the loss function for training the network. """
 
     fit_args: dict[str, Any] = field(default_factory=lambda: {})
     """
-    The keyword arguments to pass to the `fit` method of a :class:`~tf.keras.Model` instance.
+    The keyword arguments to pass to the ``fit`` method of a :class:`~tf.keras.Model` instance.
     See https://keras.io/api/models/model_training_apis/#fit-method for a list of possible
     arguments in the dictionary.
     """
 
-    metrics: Optional[list[tf.keras.metrics.Metric]] = None
+    loss: Optional[
+        Union[
+            tf_keras.losses.Loss, Callable[[TensorType, tfp.distributions.Distribution], TensorType]
+        ]
+    ] = None
+    """ Optional loss function for training the model. """
+
+    metrics: Optional[list[tf_keras.metrics.Metric]] = None
     """ Optional metrics for monitoring the performance of the network. """
+
+    def __deepcopy__(self, memo: dict[int, object]) -> KerasOptimizer:
+        # workaround for https://github.com/tensorflow/tensorflow/issues/58973
+        # (keras optimizers not being deepcopyable in TF 2.11 and 2.12)
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            if k == "optimizer" and hasattr(v, "_distribution_strategy"):
+                # avoid copying distribution strategy: reuse it instead
+                strategy = v._distribution_strategy
+                v._distribution_strategy = None
+                try:
+                    setattr(result, k, copy.deepcopy(v, memo))
+                finally:
+                    v._distribution_strategy = strategy
+                result.optimizer._distribution_strategy = strategy
+            else:
+                setattr(result, k, copy.deepcopy(v, memo))
+        return result
 
 
 @singledispatch
-def create_loss_function(
-    model: TrainableProbabilisticModel, dataset: TrainingData, compile: bool = False
-) -> LossClosure:
+def create_loss_function(model: Any, dataset: TrainingData, compile: bool = False) -> LossClosure:
     """
     Generic function for building a loss function for a specified `model` and `dataset`.
     The implementations depends on the type of the model, which should use this function as a

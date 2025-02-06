@@ -17,20 +17,31 @@ import functools
 import os
 import random
 from collections.abc import Container, Mapping
-from typing import Any, Callable, NoReturn, Optional, Sequence, TypeVar, Union, cast
+from typing import (
+    Any,
+    Callable,
+    NoReturn,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
 
 import numpy as np
 import numpy.testing as npt
 import tensorflow as tf
 from typing_extensions import Final
 
-from trieste.acquisition.rule import AcquisitionRule
+from trieste.acquisition.rule import AcquisitionRule, LocalDatasetsAcquisitionRule, SearchSpaceType
 from trieste.data import Dataset
 from trieste.models import ProbabilisticModel
-from trieste.objectives import BRANIN_SEARCH_SPACE, HARTMANN_6_SEARCH_SPACE, branin, hartmann_6
+from trieste.objectives import Branin, Hartmann6
 from trieste.objectives.utils import mk_observer
 from trieste.space import SearchSpace
-from trieste.types import TensorType
+from trieste.types import State, Tag, TensorType
 from trieste.utils import shapes_equal
 
 TF_DEBUGGING_ERROR_TYPES: Final[tuple[type[Exception], ...]] = (
@@ -43,21 +54,61 @@ C = TypeVar("C", bound=Callable[..., object])
 """ Type variable bound to `typing.Callable`. """
 
 
-def random_seed(f: C) -> C:
-    """
-    :param f: A function.
-    :return: The function ``f``, but with TensorFlow, numpy and Python randomness seeds fixed to 0.
-    """
+@overload
+def random_seed(f_py: C, seed: int = 0) -> C: ...
 
-    @functools.wraps(f)
-    def decorated(*args: Any, **kwargs: Any) -> Any:
-        os.environ["PYTHONHASHSEED"] = str(0)
-        tf.random.set_seed(0)
-        np.random.seed(0)
-        random.seed(0)
-        return f(*args, **kwargs)
 
-    return cast(C, decorated)
+@overload
+def random_seed(f_py: None = None, seed: int = 0) -> Callable[[C], C]: ...
+
+
+def random_seed(f_py: Optional[C] = None, seed: int = 0) -> Callable[[C], C] | C:
+    """
+    Decorates function ``f`` with TensorFlow, numpy and Python randomness seeds fixed to ``seed``.
+    This decorator can be used without and with the ``seed`` parameter. When used with the default
+    seed::
+
+        @random_seed
+        def foo():
+            pass
+
+    or::
+
+        @random_seed()
+        def foo():
+            pass
+
+    However, if ``seed`` needs to be set to a custom value parameter needs to be named::
+
+        @random_seed(seed=1)
+        def foo():
+            pass
+
+    :param f_py: A function to be decorated, used when ``seed`` parameter is not set.
+    :param seed: A seed to be fixed, defaults to 0.
+    """
+    assert callable(f_py) or f_py is None
+
+    def _decorator(f: C) -> C:
+        """
+        :param f: A function.
+        :return: The function ``f``, but with TensorFlow, numpy and Python randomness seeds fixed.
+        """
+
+        @functools.wraps(f)
+        def decorated(*args: Any, **kwargs: Any) -> Any:
+            os.environ["PYTHONHASHSEED"] = str(seed)
+            tf.random.set_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            return f(*args, **kwargs)
+
+        return cast(C, decorated)
+
+    if f_py is None:
+        return _decorator
+    else:
+        return _decorator(f_py)
 
 
 T = TypeVar("T")
@@ -86,14 +137,17 @@ def mk_dataset(
     )
 
 
-def empty_dataset(query_point_shape: ShapeLike, observation_shape: ShapeLike) -> Dataset:
+def empty_dataset(
+    query_point_shape: ShapeLike, observation_shape: ShapeLike, dtype: tf.DType = tf.float64
+) -> Dataset:
     """
     :param query_point_shape: The shape of a *single* query point.
     :param observation_shape: The shape of a *single* observation.
+    :param dtype: The dtype.
     :return: An empty dataset with points of the specified shapes, and dtype `tf.float64`.
     """
-    qp = tf.zeros(tf.TensorShape([0]) + query_point_shape, tf.float64)
-    obs = tf.zeros(tf.TensorShape([0]) + observation_shape, tf.float64)
+    qp = tf.zeros(tf.TensorShape([0]) + query_point_shape, dtype)
+    obs = tf.zeros(tf.TensorShape([0]) + observation_shape, dtype)
     return Dataset(qp, obs)
 
 
@@ -118,7 +172,7 @@ def quadratic(x: tf.Tensor) -> tf.Tensor:
     if x.shape == [] or x.shape[-1] == 0:
         raise ValueError(f"x must have non-empty trailing dimension, got shape {x.shape}")
 
-    return tf.reduce_sum(x ** 2, axis=-1, keepdims=True)
+    return tf.reduce_sum(x**2, axis=-1, keepdims=True)
 
 
 class FixedAcquisitionRule(AcquisitionRule[TensorType, SearchSpace, ProbabilisticModel]):
@@ -137,8 +191,8 @@ class FixedAcquisitionRule(AcquisitionRule[TensorType, SearchSpace, Probabilisti
     def acquire(
         self,
         search_space: SearchSpace,
-        models: Mapping[str, ProbabilisticModel],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, ProbabilisticModel],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
     ) -> TensorType:
         """
         :param search_space: Unused.
@@ -147,6 +201,47 @@ class FixedAcquisitionRule(AcquisitionRule[TensorType, SearchSpace, Probabilisti
         :return: The fixed value specified on initialisation.
         """
         return self._qp
+
+
+class FixedLocalAcquisitionRule(
+    FixedAcquisitionRule,
+    LocalDatasetsAcquisitionRule[State[Optional[int], TensorType], SearchSpace, ProbabilisticModel],
+):
+    """A local dataset acquisition rule that returns the same fixed value on every step and
+    keeps track of a counter internal State."""
+
+    def __init__(self, query_points: TensorType, num_local_datasets: int) -> None:
+        super().__init__(query_points)
+        self._num_local_datasets = num_local_datasets
+        self._initialize_subspaces_calls = 0
+
+    @property
+    def num_local_datasets(self) -> int:
+        return self._num_local_datasets
+
+    def initialize_subspaces(self, search_space: SearchSpaceType) -> None:
+        self._initialize_subspaces_calls += 1
+
+    def acquire(
+        self,
+        search_space: SearchSpace,
+        models: Mapping[Tag, ProbabilisticModel],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
+    ) -> TensorType:
+        def state_func(state: int | None) -> tuple[int | None, TensorType]:
+            new_state = 1 if state is None else state + 1
+            return new_state, self._qp
+
+        return state_func
+
+    def filter_datasets(
+        self, models: Mapping[Tag, ProbabilisticModel], datasets: Mapping[Tag, Dataset]
+    ) -> Mapping[Tag, Dataset] | State[int | None, Mapping[Tag, Dataset]]:
+        def state_func(state: int | None) -> Tuple[int | None, Mapping[Tag, Dataset]]:
+            new_state = 1 if state is None else state + 1
+            return new_state, datasets
+
+        return state_func
 
 
 ShapeLike = Union[tf.TensorShape, Sequence[int]]
@@ -197,10 +292,10 @@ def hartmann_6_dataset(num_query_points: int) -> Dataset:
     :param num_query_points: A number of samples from the objective function.
     :return: A dataset.
     """
-    search_space = HARTMANN_6_SEARCH_SPACE
+    search_space = Hartmann6.search_space
     query_points = search_space.sample(num_query_points)
 
-    observer = mk_observer(hartmann_6)
+    observer = mk_observer(Hartmann6.objective)
     data = observer(query_points)
 
     return data
@@ -212,10 +307,10 @@ def branin_dataset(num_query_points: int) -> Dataset:
     :param num_query_points: A number of samples from the objective function.
     :return: A dataset.
     """
-    search_space = BRANIN_SEARCH_SPACE
+    search_space = Branin.search_space
     query_points = search_space.sample(num_query_points)
 
-    observer = mk_observer(branin)
+    observer = mk_observer(Branin.objective)
     data = observer(query_points)
 
     return data

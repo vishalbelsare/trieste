@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Ask-Tell Optimization Interface
+# # Ask-Tell optimization interface
 
 # %% [markdown]
 # In this notebook we will illustrate the use of an Ask-Tell interface in Trieste. It is useful for cases where you want to have greater control of the optimization loop, or when letting Trieste manage this loop is impossible.
@@ -12,15 +12,18 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import gpflow
 
-from trieste.ask_tell_optimization import AskTellOptimizer
+from trieste.ask_tell_optimization import (
+    AskTellOptimizer,
+    AskTellOptimizerNoTraining,
+)
 from trieste.bayesian_optimizer import Record
 from trieste.data import Dataset
 from trieste.models.gpflow.models import GaussianProcessRegression
-from trieste.objectives import scaled_branin, SCALED_BRANIN_MINIMUM
+from trieste.objectives import ScaledBranin
 from trieste.objectives.utils import mk_observer
 from trieste.space import Box
 
-from util.plotting import plot_regret
+from trieste.experimental.plotting import plot_regret
 
 np.random.seed(1234)
 tf.random.set_seed(1234)
@@ -45,13 +48,13 @@ def build_model(data, kernel_func=None):
 
 num_initial_points = 5
 initial_query_points = search_space.sample(num_initial_points)
-observer = mk_observer(scaled_branin)
+observer = mk_observer(ScaledBranin.objective)
 initial_data = observer(initial_query_points)
 
 # %% [markdown]
 # ## Timing acquisition function: simple use case for Ask-Tell
 #
-# Let's say we are very concerned with the performance of the acqusition function, and want a simple way of measuring its performance over the course of the optimization. At the time of writing these lines, regular Trieste's optimizer does not provide such customization functionality, and this is where Ask-Tell comes in handy.
+# Let's say we are very concerned with the performance of the acquisition function, and want a simple way of measuring its performance over the course of the optimization. At the time of writing these lines, regular Trieste's optimizer does not provide such customization functionality, and this is where Ask-Tell comes in handy.
 
 # %%
 import timeit
@@ -73,12 +76,13 @@ for step in range(n_steps):
 # %% [markdown]
 # Once ask-tell optimization is over, you can extract an optimization result object and perform whatever analysis you need, just like with regular Trieste optimization interface. For instance, here we will plot regret for each optimization step.
 
+
 # %%
 def plot_ask_tell_regret(ask_tell_result):
     observations = ask_tell_result.try_get_final_dataset().observations.numpy()
     arg_min_idx = tf.squeeze(tf.argmin(observations, axis=0))
 
-    suboptimality = observations - SCALED_BRANIN_MINIMUM.numpy()
+    suboptimality = observations - ScaledBranin.minimum.numpy()
     ax = plt.gca()
     plot_regret(
         suboptimality, ax, num_init=num_initial_points, idx_best=arg_min_idx
@@ -95,7 +99,7 @@ plot_ask_tell_regret(ask_tell.to_result())
 # %% [markdown]
 # ## Model selection: using only Ask part
 #
-# We now turn to a slightly more complex use case. Let's suppose we want to switch between two models depending on some criteria dynamically during the optimization loop, e.g. we want to be able to train a model outside of Trieste. In this case we can only use Ask part of the Ask-Tell interface.
+# We now turn to a slightly more complex use case. Let's suppose we want to switch between two models depending on some criteria dynamically during the optimization loop, e.g. we want to be able to train a model outside of Trieste. In this case we can only use Ask part of the Ask-Tell interface. For this it is recommended to use the `AskTellOptimizerNoTraining` class, which performs no training during the Tell stage and can therefore be used with any probabilistic model, including ones which aren't trainable.
 
 # %%
 model1 = build_model(
@@ -117,8 +121,8 @@ for step in range(n_steps):
         model = model2
 
     print("Asking for new point to observe")
-    ask_tell = AskTellOptimizer(search_space, dataset, model)
-    new_point = ask_tell.ask()
+    ask_only = AskTellOptimizerNoTraining(search_space, dataset, model)
+    new_point = ask_only.ask()
 
     new_data_point = observer(new_point)
     dataset = dataset + new_data_point
@@ -130,7 +134,7 @@ for step in range(n_steps):
     model2.update(dataset)
     model2.optimize(dataset)
 
-plot_ask_tell_regret(ask_tell.to_result())
+plot_ask_tell_regret(ask_only.to_result())
 
 
 # %% [markdown]
@@ -150,11 +154,11 @@ for step in range(n_steps):
     new_config = ask_tell.ask()
 
     print("Saving Trieste state to re-use later")
-    state: Record[None] = ask_tell.to_record()
+    state: Record[None, GaussianProcessRegression] = ask_tell.to_record()
     saved_state = pickle.dumps(state)
 
     print(f"In the lab running the experiment #{step}.")
-    new_datapoint = scaled_branin(new_config)
+    new_datapoint = ScaledBranin.objective(new_config)
 
     print("Back from the lab")
     print("Restore optimizer from the saved state")
@@ -167,4 +171,23 @@ plot_ask_tell_regret(ask_tell.to_result())
 
 
 # %% [markdown]
-# A word of warning. This serialization technique is not guaranteed to work smoothly with every Tensorflow-based model, so apply to your own problems with caution.
+# In some more complicated scenarios we may also wish to serialise the acquisition function, rather than creating a new one from the models and data, as it may contain stochastic internal data (for example with continuous Thompson sampling, which uses trajectory samplers). This is not an issue here (where we used the default `EfficientGlobalOptimization` rule and `ExpectedImprovement` function) but we can demonstrate it neverthless:
+
+# %%
+from trieste.acquisition.rule import EfficientGlobalOptimization
+
+# (recreate acquisition function and extract default rule)
+ask_tell.ask()
+rule: EfficientGlobalOptimization = ask_tell._acquisition_rule  # type: ignore
+
+# save acquisition function
+acq_fn = rule.acquisition_function
+saved_acq_fn = pickle.dumps(acq_fn)
+
+# regenerate asktell with loaded acquisition function
+loaded_acq_fn = pickle.loads(saved_acq_fn)
+rule = EfficientGlobalOptimization(initial_acquisition_function=loaded_acq_fn)
+ask_tell = AskTellOptimizer.from_record(loaded_state, search_space, rule)
+
+# %% [markdown]
+# A word of warning. These serialization techniques are not guaranteed to work smoothly with every Tensorflow-based model, so apply to your own problems with caution.

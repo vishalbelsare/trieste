@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Bayesian optimization with deep ensembles
+# # Deep ensembles
 #
 # Gaussian processes as a surrogate models are hard to beat on smaller datasets and optimization budgets. However, they scale poorly with amount of data, cannot easily capture non-stationarities and they are rather slow at prediction time. Here we show how uncertainty-aware neural networks can be effective alternative to Gaussian processes in Bayesian optimisation, in particular for large budgets, non-stationary objective functions or when predictions need to be made quickly.
 #
@@ -20,18 +20,12 @@ import trieste
 # https://stackoverflow.com/questions/35911252/disable-tensorflow-debugging-information
 tf.get_logger().setLevel("ERROR")
 
-
-# %% [markdown]
-# Trieste works with `tf.float64` as a default. It is advised to set the Keras backend float to the same value using `tf.keras.backend.set_floatx()`. Otherwise code might crash with a ValueError!
-
-# %%
 np.random.seed(1794)
 tf.random.set_seed(1794)
-tf.keras.backend.set_floatx("float64")
 
 
 # %% [markdown]
-# ## Deep ensembles
+# ## What are deep ensembles?
 #
 # Deep neural networks typically output only mean predictions, not posterior distributions as probabilistic models such as Gaussian processes do. Posterior distributions encode mean predictions, but also *epistemic* uncertainty - type of uncertainty that stems from model misspecification, and which can be eliminated with further data. Aleatoric uncertainty that stems from stochasticity of the data generating process is not contained in the posterior, but can be learned from the data. Bayesian optimization requires probabilistic models because epistemic uncertainty plays a key role in balancing between exploration and exploitation.
 #
@@ -70,7 +64,7 @@ data = Dataset(inputs, outputs)
 
 
 # %% [markdown]
-# Next we define a deep ensemble model and train it. Trieste supports neural network models defined as TensorFlow's Keras models. Since creating ensemble models in Keras can be somewhat involved, Trieste provides some basic architectures. Here we use the `build_vanilla_keras_ensemble` function which builds a simple ensemble of neural networks in Keras where each network has the same architecture: number of hidden layers, nodes in hidden layers and activation function. It uses sensible defaults for many parameters and finally returns a model of `KerasEnsemble` class.
+# Next we define a deep ensemble model and train it. Trieste supports neural network models defined as TensorFlow's Keras models. Since creating ensemble models in Keras can be somewhat involved, Trieste provides some basic architectures. Here we use the `build_keras_ensemble` function which builds a simple ensemble of neural networks in Keras where each network has the same architecture: number of hidden layers, nodes in hidden layers and activation function. It uses sensible defaults for many parameters and finally returns a model of `KerasEnsemble` class.
 #
 # As with other supported types of models (e.g. Gaussian process models from GPflow), we cannot use `KerasEnsemble` directly in Bayesian optimization routines, we need to pass it through an appropriate wrapper, `DeepEnsemble` wrapper in this case. One difference with respect to other model types is that we need to use a Keras specific optimizer wrapper `KerasOptimizer` where we need to specify a stochastic optimizer (Adam is used by default, but we can use other stochastic optimizers from TensorFlow), objective function (here negative log likelihood) and we can provide custom arguments for the Keras `fit` method (here we modify the default arguments; check [Keras API documentation](https://keras.io/api/models/model_training_apis/#fit-method) for a list of possible arguments).
 #
@@ -78,11 +72,11 @@ data = Dataset(inputs, outputs)
 
 
 # %%
+from gpflow.keras import tf_keras
 from trieste.models.keras import (
     DeepEnsemble,
     KerasPredictor,
-    build_vanilla_keras_ensemble,
-    negative_log_likelihood,
+    build_keras_ensemble,
 )
 from trieste.models.optimizer import KerasOptimizer
 
@@ -92,7 +86,7 @@ def build_cubic_model(data: Dataset) -> DeepEnsemble:
     num_hidden_layers = 1
     num_nodes = 100
 
-    keras_ensemble = build_vanilla_keras_ensemble(
+    keras_ensemble = build_keras_ensemble(
         data, ensemble_size, num_hidden_layers, num_nodes
     )
 
@@ -101,9 +95,7 @@ def build_cubic_model(data: Dataset) -> DeepEnsemble:
         "epochs": 1000,
         "verbose": 0,
     }
-    optimizer = KerasOptimizer(
-        tf.keras.optimizers.Adam(0.01), negative_log_likelihood, fit_args
-    )
+    optimizer = KerasOptimizer(tf_keras.optimizers.Adam(0.01), fit_args)
 
     return DeepEnsemble(keras_ensemble, optimizer)
 
@@ -156,23 +148,18 @@ plt.show()
 
 
 # %%
-from trieste.objectives import (
-    michalewicz_2,
-    MICHALEWICZ_2_MINIMUM,
-    MICHALEWICZ_2_SEARCH_SPACE,
-)
-from util.plotting_plotly import plot_function_plotly
+from trieste.objectives import Michalewicz2
+from trieste.experimental.plotting import plot_function_plotly
 
-search_space = MICHALEWICZ_2_SEARCH_SPACE
-function = michalewicz_2
-MINIMUM = MICHALEWICZ_2_MINIMUM
-MINIMIZER = MICHALEWICZ_2_MINIMUM
+search_space = Michalewicz2.search_space
+function = Michalewicz2.objective
+MINIMUM = Michalewicz2.minimum
+MINIMIZER = Michalewicz2.minimum
 
 # we illustrate the 2-dimensional Michalewicz function
 fig = plot_function_plotly(
-    function, search_space.lower, search_space.upper, grid_density=100
+    function, search_space.lower, search_space.upper, grid_density=20
 )
-fig.update_layout(height=800, width=800)
 fig.show()
 
 
@@ -194,7 +181,7 @@ initial_data = observer(initial_query_points)
 # %% [markdown]
 # ## Modelling the objective function
 #
-# The Bayesian optimization procedure estimates the next best points to query by using a probabilistic model of the objective. Here we use a deep ensemble instead of a typical probabilistic model. Same as above we use the `build_vanilla_keras_ensemble` function to build a simple ensemble of neural networks in Keras and wrap it with a `DeepEnsemble` wrapper so it can be used in Trieste's Bayesian optimization loop.
+# The Bayesian optimization procedure estimates the next best points to query by using a probabilistic model of the objective. Here we use a deep ensemble instead of a typical probabilistic model. Same as above we use the `build_keras_ensemble` function to build a simple ensemble of neural networks in Keras and wrap it with a `DeepEnsemble` wrapper so it can be used in Trieste's Bayesian optimization loop.
 #
 # Some notes on choosing the model architecture are necessary. Unfortunately, choosing an architecture that works well for small datasets, a common setting in Bayesian optimization, is not easy. Here we do demonstrate it can work with smaller datasets, but choosing the architecture and model optimization parameters was a lengthy process that does not necessarily generalize to other problems. Hence, we advise to use deep ensembles with larger datasets and ideally large batches so that the model is not retrained after adding a single point.
 #
@@ -204,13 +191,14 @@ initial_data = observer(initial_query_points)
 #
 # Below we change the `build_model` function to adapt the model slightly for the Michalewicz function. Since it's a more complex function we increase the number of hidden layers but keep the number of nodes per layer on the lower side. Note the large number of epochs
 
+
 # %%
 def build_model(data: Dataset) -> DeepEnsemble:
     ensemble_size = 5
     num_hidden_layers = 3
     num_nodes = 25
 
-    keras_ensemble = build_vanilla_keras_ensemble(
+    keras_ensemble = build_keras_ensemble(
         data, ensemble_size, num_hidden_layers, num_nodes
     )
 
@@ -218,13 +206,11 @@ def build_model(data: Dataset) -> DeepEnsemble:
         "batch_size": 10,
         "epochs": 1000,
         "callbacks": [
-            tf.keras.callbacks.EarlyStopping(monitor="loss", patience=100)
+            tf_keras.callbacks.EarlyStopping(monitor="loss", patience=100)
         ],
         "verbose": 0,
     }
-    optimizer = KerasOptimizer(
-        tf.keras.optimizers.Adam(0.001), negative_log_likelihood, fit_args
-    )
+    optimizer = KerasOptimizer(tf_keras.optimizers.Adam(0.001), fit_args)
 
     return DeepEnsemble(keras_ensemble, optimizer)
 
@@ -292,16 +278,14 @@ print(f"True minimum: {MINIMUM}")
 # We can visualise how the optimizer performed as a three-dimensional plot. Crosses mark the initial data points while dots mark the points chosen during the Bayesian optimization run. You can see that there are some samples on the flat regions of the space, while most of the points are exploring the ridges, in particular in the vicinity of the minimum point.
 
 # %%
-from util.plotting_plotly import add_bo_points_plotly
+from trieste.experimental.plotting import add_bo_points_plotly
 
 fig = plot_function_plotly(
     function,
     search_space.lower,
     search_space.upper,
-    grid_density=100,
     alpha=0.7,
 )
-fig.update_layout(height=800, width=800)
 
 fig = add_bo_points_plotly(
     x=query_points[:, 0],
@@ -319,8 +303,7 @@ fig.show()
 
 # %%
 import matplotlib.pyplot as plt
-from util.plotting import plot_regret
-from util.plotting_plotly import plot_model_predictions_plotly
+from trieste.experimental.plotting import plot_model_predictions_plotly
 
 fig = plot_model_predictions_plotly(
     result.try_get_final_model(),
@@ -338,7 +321,6 @@ fig = add_bo_points_plotly(
     figrow=1,
     figcol=1,
 )
-fig.update_layout(height=800, width=800)
 fig.show()
 
 
@@ -346,7 +328,7 @@ fig.show()
 # Finally, let's plot the regret over time, i.e. difference between the minimum of the objective function and lowest observations found by the Bayesian optimization over time. Below you can see two plots. The left hand plot shows the regret over time: the observations (crosses and dots), the current best (orange line), and the start of the optimization loop (blue line). The right hand plot is a two-dimensional search space that shows where in the search space initial points were located (crosses again) and where Bayesian optimization allocated samples (dots). The best point is shown in each (purple dot) and on the left plot you can see that we come very close to 0 which is the minimum of the objective function.
 
 # %%
-from util.plotting import plot_regret, plot_bo_points
+from trieste.experimental.plotting import plot_regret, plot_bo_points
 
 suboptimality = observations - MINIMUM.numpy()
 

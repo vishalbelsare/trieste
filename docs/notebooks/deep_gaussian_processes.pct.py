@@ -1,17 +1,12 @@
 # %% [markdown]
-# # Using deep Gaussian processes with GPflux for Bayesian optimization.
+# # Deep Gaussian processes
 
 # %%
 import numpy as np
 import tensorflow as tf
 
-# %% [markdown]
-# For GPflux models we <strong>must</strong> use `tf.keras.backend.set_floatx()` to set the Keras backend float to the value consistent with GPflow (GPflow defaults to float64). Otherwise the code will crash with a ValueError!
-
-# %%
 np.random.seed(1794)
 tf.random.set_seed(1794)
-tf.keras.backend.set_floatx("float64")
 
 # %% [markdown]
 # ## Describe the problem
@@ -23,25 +18,16 @@ tf.keras.backend.set_floatx("float64")
 # The Michalewicz functions are highly non-stationary and have a global minimum that's hard to find, so DGPs might be more suitable than standard GPs, which may struggle because they typically have stationary kernels that cannot easily model non-stationarities.
 
 # %%
-import gpflow
-from trieste.objectives import (
-    michalewicz_2,
-    michalewicz_5,
-    MICHALEWICZ_2_MINIMUM,
-    MICHALEWICZ_5_MINIMUM,
-    MICHALEWICZ_2_SEARCH_SPACE,
-    MICHALEWICZ_5_SEARCH_SPACE,
-)
+from trieste.objectives import Michalewicz2, Michalewicz5
 from trieste.objectives.utils import mk_observer
-from util.plotting_plotly import plot_function_plotly
+from trieste.experimental.plotting import plot_function_plotly
 
-function = michalewicz_2
-F_MINIMIZER = MICHALEWICZ_2_MINIMUM
+function = Michalewicz2.objective
+F_MINIMIZER = Michalewicz2.minimum
 
-search_space = MICHALEWICZ_2_SEARCH_SPACE
+search_space = Michalewicz2.search_space
 
 fig = plot_function_plotly(function, search_space.lower, search_space.upper)
-fig.update_layout(height=800, width=800)
 fig.show()
 
 # %% [markdown]
@@ -64,40 +50,30 @@ initial_data = observer(initial_query_points)
 #
 # The Bayesian optimization procedure estimates the next best points to query by using a probabilistic model of the objective. We'll use a two layer deep Gaussian process (DGP), built using GPflux. We also compare to a (shallow) GP.
 #
-# Since DGPs can be hard to build, Trieste provides some basic architectures: here we use the `build_vanilla_deep_gp` function which returns a GPflux model of `DeepGP` class. As with other models (e.g. GPflow), we cannot use it directly in Bayesian optimization routines, we need to pass it through an appropriate wrapper, `DeepGaussianProcess` wrapper in this case.
+# Since DGPs can be hard to build, Trieste provides some basic architectures: here we use the `build_vanilla_deep_gp` function which returns a GPflux model of `DeepGP` class. As with other models (e.g. GPflow), we cannot use it directly in Bayesian optimization routines, we need to pass it through an appropriate wrapper, `DeepGaussianProcess` wrapper in this case. Additionally, since the GPflux interface does not currently support copying DGP architectures, if we wish to have the Bayesian optimizer track the model state, we need to pass in the DGP as a callable closure so that the architecture can be recreated when required (alternatively, we can set `set_state=False` on the optimize call).
 #
-# Few other useful notes regarding building a DGP model. The DGP model requires us to specify the number of inducing points, as we don't have the true posterior. To train the model we have to use a stochastic optimizer; Adam is used by default, but we can use other stochastic optimizers from TensorFlow. GPflux allows us to use the Keras `fit` method, which makes optimizing a lot easier - this method is used in the background for training the model. For this problem we need to modify the default optimizer settings slightly, so we initialize a new optimizer wrapper instance (`Optimizer`) with custom minimization arguments `minimize_args` which are passed to Keras' `fit` method (check [Keras API documentation](https://keras.io/api/models/model_training_apis/#fit-method) for a list of possible arguments).
+# A few other useful notes regarding building a DGP model: The DGP model requires us to specify the number of inducing points, as we don't have the true posterior. To train the model we have to use a stochastic optimizer; Adam is used by default, but we can use other stochastic optimizers from TensorFlow. GPflux allows us to use the Keras `fit` method, which makes optimizing a lot easier - this method is used in the background for training the model.
 
 # %%
-from gpflow.utilities import set_trainable
+from functools import partial
 
 from trieste.models.gpflux import DeepGaussianProcess, build_vanilla_deep_gp
-from trieste.models.optimizer import Optimizer
 
 
-def build_dgp_model(data):
-    variance = tf.math.reduce_variance(data.observations)
-
-    dgp = build_vanilla_deep_gp(
-        data.query_points, num_layers=2, num_inducing=100
+def build_dgp_model(data, search_space):
+    dgp = partial(
+        build_vanilla_deep_gp,
+        data,
+        search_space,
+        2,
+        100,
+        likelihood_variance=1e-5,
+        trainable_likelihood=False,
     )
-    dgp.f_layers[-1].kernel.kernel.variance.assign(variance)
-    dgp.f_layers[-1].mean_function = gpflow.mean_functions.Constant()
-    dgp.likelihood_layer.likelihood.variance.assign(1e-5)
-    set_trainable(dgp.likelihood_layer.likelihood.variance, False)
-
-    # These are just arguments for the Keras `fit` method.
-    minimize_args = {
-        "batch_size": 100,
-        "epochs": 200,
-        "verbose": 0,
-    }
-    optimizer = Optimizer(tf.optimizers.Adam(0.01), minimize_args)
-
-    return DeepGaussianProcess(model=dgp, optimizer=optimizer)
+    return DeepGaussianProcess(dgp)
 
 
-dgp_model = build_dgp_model(initial_data)
+dgp_model = build_dgp_model(initial_data, search_space)
 
 # %% [markdown]
 # ## Run the optimization loop
@@ -115,14 +91,11 @@ bo = trieste.bayesian_optimizer.BayesianOptimizer(observer, search_space)
 grid_size = 1000
 acquisition_rule = DiscreteThompsonSampling(grid_size, 1)
 
-# Note that the GPflux interface does not currently support using `track_state=True`. This will be
-# addressed in a future update.
 dgp_result = bo.optimize(
     num_steps,
     initial_data,
     dgp_model,
     acquisition_rule=acquisition_rule,
-    track_state=False,
 )
 dgp_dataset = dgp_result.try_get_final_dataset()
 
@@ -144,12 +117,11 @@ print(f"observation: {dgp_observations[dgp_arg_min_idx, :]}")
 # We can visualise how the optimizer performed as a three-dimensional plot
 
 # %%
-from util.plotting_plotly import add_bo_points_plotly
+from trieste.experimental.plotting import add_bo_points_plotly
 
 fig = plot_function_plotly(
     function, search_space.lower, search_space.upper, alpha=0.5
 )
-fig.update_layout(height=800, width=800)
 
 fig = add_bo_points_plotly(
     x=dgp_query_points[:, 0],
@@ -166,8 +138,10 @@ fig.show()
 
 # %%
 import matplotlib.pyplot as plt
-from util.plotting import plot_regret
-from util.plotting_plotly import plot_model_predictions_plotly
+from trieste.experimental.plotting import (
+    plot_regret,
+    plot_model_predictions_plotly,
+)
 
 fig = plot_model_predictions_plotly(
     dgp_result.try_get_final_model(),
@@ -186,16 +160,12 @@ fig = add_bo_points_plotly(
     figrow=1,
     figcol=1,
 )
-fig.update_layout(height=800, width=800)
 fig.show()
 
 # %% [markdown]
 # We now compare to a GP model with priors over the hyperparameters. We do not expect this to do as well because GP models cannot deal with non-stationary functions well.
 
 # %%
-import gpflow
-import tensorflow_probability as tfp
-
 from trieste.models.gpflow import GaussianProcessRegression, build_gpr
 
 gpflow_model = build_gpr(initial_data, search_space, likelihood_variance=1e-7)
@@ -208,7 +178,6 @@ result = bo.optimize(
     initial_data,
     gp_model,
     acquisition_rule=acquisition_rule,
-    track_state=False,
 )
 gp_dataset = result.try_get_final_dataset()
 
@@ -236,7 +205,6 @@ fig = add_bo_points_plotly(
     figrow=1,
     figcol=1,
 )
-fig.update_layout(height=800, width=800)
 fig.show()
 
 # %% [markdown]
@@ -281,10 +249,10 @@ ax[1].set_xlabel("# evaluations")
 
 # %%
 
-function = michalewicz_5
-F_MINIMIZER = MICHALEWICZ_5_MINIMUM
+function = Michalewicz5.objective
+F_MINIMIZER = Michalewicz5.minimum
 
-search_space = MICHALEWICZ_5_SEARCH_SPACE
+search_space = Michalewicz5.search_space
 
 observer = mk_observer(function)
 
@@ -298,7 +266,7 @@ initial_data = observer(initial_query_points)
 
 # %%
 
-dgp_model = build_dgp_model(initial_data)
+dgp_model = build_dgp_model(initial_data, search_space)
 
 bo = trieste.bayesian_optimizer.BayesianOptimizer(observer, search_space)
 acquisition_rule = DiscreteThompsonSampling(grid_size, 1)
@@ -308,7 +276,6 @@ dgp_result = bo.optimize(
     initial_data,
     dgp_model,
     acquisition_rule=acquisition_rule,
-    track_state=False,
 )
 dgp_dataset = dgp_result.try_get_final_dataset()
 
@@ -337,7 +304,6 @@ result = bo.optimize(
     initial_data,
     gp_model,
     acquisition_rule=acquisition_rule,
-    track_state=False,
 )
 gp_dataset = result.try_get_final_dataset()
 

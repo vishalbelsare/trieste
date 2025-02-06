@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import gpflow
 import numpy.testing as npt
@@ -24,6 +24,7 @@ from gpflow.models import GPModel
 from tests.util.misc import random_seed
 from trieste.data import Dataset
 from trieste.models.gpflow import BatchReparametrizationSampler, GPflowPredictor
+from trieste.space import CategoricalSearchSpace, one_hot_encoder
 
 
 class _QuadraticPredictor(GPflowPredictor):
@@ -31,11 +32,17 @@ class _QuadraticPredictor(GPflowPredictor):
     def model(self) -> GPModel:
         return _QuadraticGPModel()
 
-    def update(self, dataset: Dataset) -> None:
-        pass
+    def optimize_encoded(self, dataset: Dataset) -> None:
+        self.optimizer.optimize(self.model, dataset)
+
+    def update_encoded(self, dataset: Dataset) -> None:
+        return
+
+    def log(self, dataset: Optional[Dataset] = None) -> None:
+        return
 
 
-class _QuadraticGPModel(GPModel):  # type: ignore[misc]
+class _QuadraticGPModel(GPModel):
     def __init__(self) -> None:
         super().__init__(
             gpflow.kernels.Polynomial(2),  # not actually used
@@ -47,7 +54,7 @@ class _QuadraticGPModel(GPModel):  # type: ignore[misc]
         self, Xnew: tf.Tensor, full_cov: bool = False, full_output_cov: bool = False
     ) -> tuple[tf.Tensor, tf.Tensor]:
         assert not full_output_cov, "Test utility not implemented for full output covariance"
-        mean = tf.reduce_sum(Xnew ** 2, axis=1, keepdims=True)
+        mean = tf.reduce_sum(Xnew**2, axis=1, keepdims=True)
         *leading, x_samples, y_dims = mean.shape
         var_shape = [*leading, y_dims, x_samples, x_samples] if full_cov else mean.shape
         return mean, tf.ones(var_shape, dtype=mean.dtype)
@@ -106,3 +113,14 @@ def test_gpflow_reparam_sampler_returns_reparam_sampler_with_correct_samples() -
     linear_error = 1 / tf.sqrt(tf.cast(num_samples, tf.float32))
     npt.assert_allclose(sample_mean, [[6.25]], rtol=linear_error)
     npt.assert_allclose(sample_variance, 1.0, rtol=2 * linear_error)
+
+
+def test_gpflow_categorical_predict() -> None:
+    search_space = CategoricalSearchSpace(["Red", "Green", "Blue"])
+    query_points = search_space.sample(10)
+    model = _QuadraticPredictor(encoder=one_hot_encoder(search_space))
+    mean, variance = model.predict(query_points)
+    assert mean.shape == [10, 1]
+    assert variance.shape == [10, 1]
+    npt.assert_allclose(mean, [[1.0]] * 10, rtol=0.01)
+    npt.assert_allclose(variance, [[1.0]] * 10, rtol=0.01)

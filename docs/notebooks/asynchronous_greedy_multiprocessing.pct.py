@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Asynchronous Bayesian optimization with Trieste
+# # Asynchronous Bayesian Optimization
 #
 # In this notebook we demonstrate Trieste's ability to perform asynchronous Bayesian optimisation, as is suitable for scenarios where the objective function can be run for several points in parallel but where observations might return back at different times. To avoid wasting resources waiting for the evaluation of the whole batch, we immediately request the next point asynchronously, taking into account points that are still being evaluated. Besides saving resources, asynchronous approach also can potentially [improve sample efficiency](https://arxiv.org/abs/1901.10452) in comparison with synchronous batch strategies, although this is highly dependent on the use case.
 #
@@ -22,7 +22,7 @@ import timeit
 # %% [markdown]
 # First, let's define a simple objective that will emulate evaluations taking variable time. We will be using a classic Bayesian optimisation benchmark function [Branin](https://www.sfu.ca/~ssurjano/branin.html) with a sleep call inserted in the middle of the calculation to emulate delay. Our sleep delay is a scaled sum of all input values to make sure delays are uneven.
 # %%
-from trieste.objectives import scaled_branin
+from trieste.objectives import ScaledBranin
 
 
 def objective(points, sleep=True):
@@ -33,7 +33,7 @@ def objective(points, sleep=True):
 
     observations = []
     for point in points:
-        observation = scaled_branin(point)
+        observation = ScaledBranin.objective(point)
         if sleep:
             # insert some artificial delay
             # increases linearly with the absolute value of points
@@ -59,7 +59,6 @@ objective(np.array([[0.1, 0.5]]), sleep=False)
 # %%
 from trieste.space import Box
 from trieste.data import Dataset
-from trieste.objectives import SCALED_BRANIN_MINIMUM
 
 search_space = Box([0, 0], [1, 1])
 num_initial_points = 3
@@ -212,7 +211,7 @@ try:
                 f"Process {pid}: Main     : received data {new_data}",
                 flush=True,
             )
-        except:
+        except Exception:
             continue
 
         # new_data is a tuple of (point, observation value)
@@ -236,7 +235,7 @@ stop = timeit.default_timer()
 # Collect the observations, compute the running time
 async_lp_observations = (
     async_bo.to_result().try_get_final_dataset().observations
-    - SCALED_BRANIN_MINIMUM
+    - ScaledBranin.minimum
 )
 async_lp_time = stop - start
 print(f"Got {len(async_lp_observations)} observations in {async_lp_time:.2f}s")
@@ -317,7 +316,7 @@ stop = timeit.default_timer()
 # Collect the observations, compute the running time
 sync_lp_observations = (
     sync_bo.to_result().try_get_final_dataset().observations
-    - SCALED_BRANIN_MINIMUM
+    - ScaledBranin.minimum
 )
 sync_lp_time = stop - start
 print(f"Got {len(sync_lp_observations)} observations in {sync_lp_time:.2f}s")
@@ -328,7 +327,7 @@ print(f"Got {len(sync_lp_observations)} observations in {sync_lp_time:.2f}s")
 # To compare outcomes of sync and async runs, let's plot their respective regrets side by side, and print out the running time. For this toy problem we expect async scenario to run a little bit faster on machines with multiple CPU.
 
 # %%
-from util.plotting import plot_regret
+from trieste.experimental.plotting import plot_regret
 import matplotlib.pyplot as plt
 
 fig, ax = plt.subplots(1, 2)

@@ -187,9 +187,9 @@ class ExactPartition2dNonDominated(_BoundIndexPartition):
         :param front: non-dominated pareto front.
         """
         tf.debugging.assert_equal(
-            tf.cast(tf.reduce_sum(tf.abs(non_dominated(front)[1])), dtype=front.dtype),
-            tf.zeros(shape=1, dtype=front.dtype),
-            message=f"\ninput {front} " f"contains dominated points",
+            tf.reduce_all(non_dominated(front)[1]),
+            True,
+            message=f"\ninput {front} contains dominated points",
         )
         self.front = tf.gather_nd(front, tf.argsort(front[:, :1], axis=0))  # sort input front
         self._bounds = self._get_bound_index()
@@ -233,9 +233,9 @@ class DividedAndConquerNonDominated(_BoundIndexPartition):
             approximated partition.
         """
         tf.debugging.assert_equal(
-            tf.cast(tf.reduce_sum(tf.abs(non_dominated(front)[1])), dtype=front.dtype),
-            tf.zeros(shape=1, dtype=front.dtype),
-            message=f"\ninput {front} " f"contains dominated points",
+            tf.reduce_all(non_dominated(front)[1]),
+            True,
+            message=f"\ninput {front} contains dominated points",
         )
         self.front = tf.gather_nd(front, tf.argsort(front[:, :1], axis=0))  # sort
         self.front = front

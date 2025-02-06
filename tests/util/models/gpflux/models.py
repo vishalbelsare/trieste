@@ -21,19 +21,22 @@ from typing import Any, Dict, Tuple
 
 import gpflow
 import tensorflow as tf
+from gpflow.keras import tf_keras
 from gpflow.utilities import set_trainable
 from gpflux.architectures import Config, build_constant_input_dim_deep_gp
+from gpflux.helpers import construct_basic_kernel
 from gpflux.layers import GPLayer
 from gpflux.models import DeepGP
 
-from trieste.data import TensorType
+from trieste.data import Dataset, TensorType
 from trieste.models.gpflux import DeepGaussianProcess, build_vanilla_deep_gp
-from trieste.models.optimizer import BatchOptimizer
+from trieste.models.optimizer import KerasOptimizer
+from trieste.space import SearchSpace
+from trieste.utils import to_numpy
 
 
 def single_layer_dgp_model(x: TensorType) -> DeepGP:
-    if isinstance(x, tf.Tensor):
-        x = x.numpy()
+    x = to_numpy(x)
 
     config = Config(
         num_inducing=len(x),
@@ -46,8 +49,7 @@ def single_layer_dgp_model(x: TensorType) -> DeepGP:
 
 
 def two_layer_dgp_model(x: TensorType) -> DeepGP:
-    if isinstance(x, tf.Tensor):
-        x = x.numpy()
+    x = to_numpy(x)
 
     config = Config(
         num_inducing=len(x),
@@ -60,8 +62,7 @@ def two_layer_dgp_model(x: TensorType) -> DeepGP:
 
 
 def simple_two_layer_dgp_model(x: TensorType) -> DeepGP:
-    if isinstance(x, tf.Tensor):
-        x = x.numpy()
+    x = to_numpy(x)
     x_shape = x.shape[-1]
     num_data = len(x)
 
@@ -88,16 +89,54 @@ def simple_two_layer_dgp_model(x: TensorType) -> DeepGP:
     return DeepGP([gp_layer_1, gp_layer_2], gpflow.likelihoods.Gaussian(0.01))
 
 
+def separate_independent_kernel_two_layer_dgp_model(x: TensorType) -> DeepGP:
+    x = to_numpy(x)
+    x_shape = x.shape[-1]
+    num_data = len(x)
+
+    Z = x.copy()
+    kernel_list = [
+        gpflow.kernels.SquaredExponential(
+            variance=tf.exp(tf.random.normal([], dtype=gpflow.default_float())),
+            lengthscales=tf.exp(tf.random.normal([], dtype=gpflow.default_float())),
+        )
+        for _ in range(x_shape)
+    ]
+    kernel_1 = construct_basic_kernel(kernel_list)
+    inducing_variable_1 = gpflow.inducing_variables.SharedIndependentInducingVariables(
+        gpflow.inducing_variables.InducingPoints(Z.copy())
+    )
+    gp_layer_1 = GPLayer(
+        kernel_1,
+        inducing_variable_1,
+        num_data=num_data,
+        num_latent_gps=x_shape,
+    )
+
+    kernel_2 = gpflow.kernels.SquaredExponential()
+    inducing_variable_2 = gpflow.inducing_variables.InducingPoints(Z.copy())
+    gp_layer_2 = GPLayer(
+        kernel_2,
+        inducing_variable_2,
+        num_data=num_data,
+        num_latent_gps=1,
+        mean_function=gpflow.mean_functions.Zero(),
+    )
+
+    return DeepGP([gp_layer_1, gp_layer_2], gpflow.likelihoods.Gaussian(0.01))
+
+
 def trieste_deep_gaussian_process(
-    query_points: TensorType,
-    depth: int,
-    num_inducing: int,
+    data: Dataset,
+    search_space: SearchSpace,
+    num_layers: int,
+    num_inducing_points: int,
     learning_rate: float,
     batch_size: int,
     epochs: int,
     fix_noise: bool = False,
 ) -> Tuple[DeepGaussianProcess, Dict[str, Any]]:
-    dgp = build_vanilla_deep_gp(query_points, num_layers=depth, num_inducing=num_inducing)
+    dgp = build_vanilla_deep_gp(data, search_space, num_layers, num_inducing_points)
     if fix_noise:
         dgp.likelihood_layer.likelihood.variance.assign(1e-5)
         set_trainable(dgp.likelihood_layer, False)
@@ -112,10 +151,14 @@ def trieste_deep_gaussian_process(
         "batch_size": batch_size,
         "epochs": epochs,
         "verbose": 0,
-        "callbacks": tf.keras.callbacks.LearningRateScheduler(scheduler),
+        "callbacks": tf_keras.callbacks.LearningRateScheduler(scheduler),
     }
-    optimizer = BatchOptimizer(tf.optimizers.Adam(learning_rate), fit_args)
+    optimizer = KerasOptimizer(tf_keras.optimizers.Adam(learning_rate), fit_args)
 
     model = DeepGaussianProcess(dgp, optimizer)
 
     return model, fit_args
+
+
+def two_layer_trieste_dgp(data: Dataset, search_space: SearchSpace) -> DeepGaussianProcess:
+    return trieste_deep_gaussian_process(data, search_space, 2, 10, 0.01, 5, 10)[0]

@@ -13,8 +13,8 @@ Alternatively, to build the docs in a virtual environment rather than using tox,
 have the necessary requirements installed:
 
 ```bash
-$ pip install -r notebooks/requirements.txt
-$ pip install -r docs/requirements.txt
+$ pip install -r notebooks/requirements.txt -c notebooks/constraints.txt
+$ pip install -r docs/requirements.txt -c docs/constraints.txt
 ```
 
 And then run `make html` in the `docs` subdirectory.
@@ -69,8 +69,8 @@ $ python notebooks/quickrun/quickrun.py
 ```
 Note that this will modify the notebook files.
 To revert them to what they were before, you can execute the following:
-```python
-python notebooks/quickrun/quickrun.py --revert
+```bash
+$ python notebooks/quickrun/quickrun.py --revert
 ```
 
 # License

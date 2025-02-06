@@ -21,19 +21,23 @@ from typing import Callable, Dict, Mapping, Optional, Union, cast
 import gpflow
 import tensorflow as tf
 import tensorflow_probability as tfp
+from check_shapes import check_shapes
 from typing_extensions import Protocol, runtime_checkable
 
 from ...data import Dataset
 from ...models import FastUpdateModel, ModelStack, ProbabilisticModel
 from ...models.interfaces import (
     PredictJointModelStack,
+    PredictJointPredictYModelStack,
+    PredictYModelStack,
     SupportsGetKernel,
     SupportsGetObservationNoise,
     SupportsPredictJoint,
+    SupportsPredictY,
 )
 from ...observer import OBJECTIVE
 from ...space import SearchSpace
-from ...types import TensorType
+from ...types import Tag, TensorType
 from ..interface import (
     AcquisitionFunction,
     AcquisitionFunctionBuilder,
@@ -44,7 +48,7 @@ from ..interface import (
     UpdatablePenalizationFunction,
 )
 from .entropy import MinValueEntropySearch
-from .function import ExpectedImprovement, expected_improvement
+from .function import ExpectedImprovement, MakePositive, expected_improvement
 
 
 class LocalPenalization(SingleModelGreedyAcquisitionBuilder[ProbabilisticModel]):
@@ -73,13 +77,18 @@ class LocalPenalization(SingleModelGreedyAcquisitionBuilder[ProbabilisticModel])
         self,
         search_space: SearchSpace,
         num_samples: int = 500,
-        penalizer: Callable[
-            [ProbabilisticModel, TensorType, TensorType, TensorType],
-            Union[PenalizationFunction, UpdatablePenalizationFunction],
+        penalizer: Optional[
+            Callable[
+                [ProbabilisticModel, TensorType, TensorType, TensorType],
+                Union[PenalizationFunction, UpdatablePenalizationFunction],
+            ]
         ] = None,
-        base_acquisition_function_builder: ExpectedImprovement
-        | MinValueEntropySearch[ProbabilisticModel]
-        | None = None,
+        base_acquisition_function_builder: (
+            ExpectedImprovement
+            | MinValueEntropySearch[ProbabilisticModel]
+            | MakePositive[ProbabilisticModel]
+            | None
+        ) = None,
     ):
         """
         :param search_space: The global search space over which the optimisation is defined.
@@ -101,9 +110,9 @@ class LocalPenalization(SingleModelGreedyAcquisitionBuilder[ProbabilisticModel])
         self._lipschitz_penalizer = soft_local_penalizer if penalizer is None else penalizer
 
         if base_acquisition_function_builder is None:
-            self._base_builder: SingleModelAcquisitionBuilder[
-                ProbabilisticModel
-            ] = ExpectedImprovement()
+            self._base_builder: SingleModelAcquisitionBuilder[ProbabilisticModel] = (
+                ExpectedImprovement()
+            )
         else:
             self._base_builder = base_acquisition_function_builder
 
@@ -126,7 +135,7 @@ class LocalPenalization(SingleModelGreedyAcquisitionBuilder[ProbabilisticModel])
         :return: The (log) expected improvement penalized with respect to the pending points.
         :raise tf.errors.InvalidArgumentError: If the ``dataset`` is empty.
         """
-        tf.debugging.Assert(dataset is not None, [])
+        tf.debugging.Assert(dataset is not None, [tf.constant([])])
         dataset = cast(Dataset, dataset)
         tf.debugging.assert_positive(len(dataset), message="Dataset must be populated.")
 
@@ -155,10 +164,10 @@ class LocalPenalization(SingleModelGreedyAcquisitionBuilder[ProbabilisticModel])
             for the current step. Defaults to ``True``.
         :return: The updated acquisition function.
         """
-        tf.debugging.Assert(dataset is not None, [])
+        tf.debugging.Assert(dataset is not None, [tf.constant([])])
         dataset = cast(Dataset, dataset)
         tf.debugging.assert_positive(len(dataset), message="Dataset must be populated.")
-        tf.debugging.Assert(self._base_acquisition_function is not None, [])
+        tf.debugging.Assert(self._base_acquisition_function is not None, [tf.constant([])])
 
         if new_optimization_step:
             self._update_base_acquisition_function(dataset, model)
@@ -189,16 +198,10 @@ class LocalPenalization(SingleModelGreedyAcquisitionBuilder[ProbabilisticModel])
             self._penalization = self._lipschitz_penalizer(
                 model, pending_points, self._lipschitz_constant, self._eta
             )
-
-            @tf.function
-            def penalized_acquisition(x: TensorType) -> TensorType:
-                log_acq = tf.math.log(
-                    cast(AcquisitionFunction, self._base_acquisition_function)(x)
-                ) + tf.math.log(cast(PenalizationFunction, self._penalization)(x))
-                return tf.math.exp(log_acq)
-
-            self._penalized_acquisition = penalized_acquisition
-            return penalized_acquisition
+            self._penalized_acquisition = PenalizedAcquisition(
+                cast(PenalizedAcquisition, self._base_acquisition_function), self._penalization
+            )
+            return self._penalized_acquisition
 
     @tf.function(experimental_relax_shapes=True)
     def _get_lipschitz_estimate(
@@ -242,6 +245,28 @@ class LocalPenalization(SingleModelGreedyAcquisitionBuilder[ProbabilisticModel])
                 dataset=dataset,
             )
         return self._base_acquisition_function
+
+
+class PenalizedAcquisition:
+    """Class representing a penalized acquisition function."""
+
+    # (note that this needs to be defined as a top level class make it pickleable)
+    def __init__(
+        self, base_acquisition_function: AcquisitionFunction, penalization: PenalizationFunction
+    ):
+        """
+        :param base_acquisition_function: Base (unpenalized) acquisition function.
+        :param penalization: Penalization function.
+        """
+        self._base_acquisition_function = base_acquisition_function
+        self._penalization = penalization
+
+    @tf.function
+    def __call__(self, x: TensorType) -> TensorType:
+        log_acq = tf.math.log(self._base_acquisition_function(x)) + tf.math.log(
+            self._penalization(x)
+        )
+        return tf.math.exp(log_acq)
 
 
 class local_penalizer(UpdatablePenalizationFunction):
@@ -288,7 +313,6 @@ class local_penalizer(UpdatablePenalizationFunction):
 
 
 class soft_local_penalizer(local_penalizer):
-
     r"""
     Return the soft local penalization function used for single-objective greedy batch Bayesian
     optimization in :cite:`Gonzalez:2016`.
@@ -325,7 +349,7 @@ class soft_local_penalizer(local_penalizer):
         )
         standardised_distances = (pairwise_distances - self._radius) / self._scale
 
-        normal = tfp.distributions.Normal(tf.cast(0, x.dtype), tf.cast(1, x.dtype))
+        normal = tfp.distributions.Normal(tf.constant(0, x.dtype), tf.constant(1, x.dtype))
         penalization = normal.cdf(standardised_distances)
         return tf.reduce_prod(penalization, axis=-1)
 
@@ -366,20 +390,23 @@ class hard_local_penalizer(local_penalizer):
 
 @runtime_checkable
 class FantasizerModelType(
-    FastUpdateModel, SupportsPredictJoint, SupportsGetKernel, SupportsGetObservationNoise, Protocol
+    FastUpdateModel,
+    SupportsPredictJoint,
+    SupportsPredictY,
+    SupportsGetKernel,
+    SupportsGetObservationNoise,
+    Protocol,
 ):
     """The model requirements for the Fantasizer acquisition function."""
 
-    pass
 
-
-class FantasizerModelStack(PredictJointModelStack, ModelStack[FantasizerModelType]):
+class FantasizerModelStack(
+    PredictJointModelStack, PredictYModelStack, ModelStack[FantasizerModelType]
+):
     """
     A stack of models :class:`FantasizerModelType` models. Note that this delegates predict_joint
-    but none of the other methods.
+    and predict_y but none of the other methods.
     """
-
-    pass
 
 
 FantasizerModelOrStack = Union[FantasizerModelType, FantasizerModelStack]
@@ -420,7 +447,7 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
             See class docs for more details.
         :raise tf.errors.InvalidArgumentError: If ``fantasize_method`` is not "KB" or "sample".
         """
-        tf.debugging.Assert(fantasize_method in ["KB", "sample"], [])
+        tf.debugging.Assert(fantasize_method in ["KB", "sample"], [tf.constant([])])
 
         if base_acquisition_function_builder is None:
             base_acquisition_function_builder = ExpectedImprovement()
@@ -434,15 +461,14 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
         self._base_acquisition_function: Optional[AcquisitionFunction] = None
         self._fantasized_acquisition: Optional[AcquisitionFunction] = None
         self._fantasized_models: Mapping[
-            str, _fantasized_model | ModelStack[SupportsPredictJoint]
+            Tag, _fantasized_model | ModelStack[SupportsPredictJoint]
         ] = {}
 
     def _update_base_acquisition_function(
         self,
-        models: Mapping[str, FantasizerModelOrStack],
-        datasets: Optional[Mapping[str, Dataset]],
+        models: Mapping[Tag, FantasizerModelOrStack],
+        datasets: Optional[Mapping[Tag, Dataset]],
     ) -> AcquisitionFunction:
-
         if self._base_acquisition_function is not None:
             self._base_acquisition_function = self._builder.update_acquisition_function(
                 self._base_acquisition_function, models, datasets
@@ -455,11 +481,10 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
 
     def _update_fantasized_acquisition_function(
         self,
-        models: Mapping[str, FantasizerModelOrStack],
-        datasets: Optional[Mapping[str, Dataset]],
+        models: Mapping[Tag, FantasizerModelOrStack],
+        datasets: Optional[Mapping[Tag, Dataset]],
         pending_points: TensorType,
     ) -> AcquisitionFunction:
-
         tf.debugging.assert_rank(pending_points, 2)
 
         fantasized_data = {
@@ -482,7 +507,7 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
                 for tag, model in models.items()
             }
             self._fantasized_acquisition = self._builder.prepare_acquisition_function(
-                cast(Dict[str, SupportsPredictJoint], self._fantasized_models), datasets
+                cast(Dict[Tag, SupportsPredictJoint], self._fantasized_models), datasets
             )
         else:
             for tag, model in self._fantasized_models.items():
@@ -499,7 +524,7 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
                     model.update_fantasized_data(fantasized_data[tag])
             self._builder.update_acquisition_function(
                 self._fantasized_acquisition,
-                cast(Dict[str, SupportsPredictJoint], self._fantasized_models),
+                cast(Dict[Tag, SupportsPredictJoint], self._fantasized_models),
                 datasets,
             )
 
@@ -507,8 +532,8 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
 
     def prepare_acquisition_function(
         self,
-        models: Mapping[str, FantasizerModelOrStack],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, FantasizerModelOrStack],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
         pending_points: Optional[TensorType] = None,
     ) -> AcquisitionFunction:
         """
@@ -528,7 +553,7 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
                 raise NotImplementedError(
                     f"Fantasizer only works with FastUpdateModel models that also support "
                     f"predict_joint, get_kernel and get_observation_noise, or with "
-                    f"ModelStack stacks of such models; received {model.__repr__()}"
+                    f"ModelStack stacks of such models; received {model!r}"
                 )
         if pending_points is None:
             return self._update_base_acquisition_function(models, datasets)
@@ -538,8 +563,8 @@ class Fantasizer(GreedyAcquisitionFunctionBuilder[FantasizerModelOrStack]):
     def update_acquisition_function(
         self,
         function: AcquisitionFunction,
-        models: Mapping[str, FantasizerModelOrStack],
-        datasets: Optional[Mapping[str, Dataset]] = None,
+        models: Mapping[Tag, FantasizerModelOrStack],
+        datasets: Optional[Mapping[Tag, Dataset]] = None,
         pending_points: Optional[TensorType] = None,
         new_optimization_step: bool = True,
     ) -> AcquisitionFunction:
@@ -579,16 +604,14 @@ def _generate_fantasized_data(
     elif fantasize_method == "sample":
         fantasized_obs = model.sample(pending_points, num_samples=1)[0]
     else:
-        raise NotImplementedError(
-            f"fantasize_method must be KB or sample, " f"received {model.__repr__()}"
-        )
+        raise NotImplementedError(f"fantasize_method must be KB or sample, received {model!r}")
 
     return Dataset(pending_points, fantasized_obs)
 
 
 def _generate_fantasized_model(
     model: FantasizerModelOrStack, fantasized_data: Dataset
-) -> _fantasized_model | PredictJointModelStack:
+) -> _fantasized_model | PredictJointPredictYModelStack:
     if isinstance(model, ModelStack):
         observations = tf.split(fantasized_data.observations, model._event_sizes, axis=-1)
         fmods = []
@@ -599,12 +622,14 @@ def _generate_fantasized_model(
                     event_size,
                 )
             )
-        return PredictJointModelStack(*fmods)
+        return PredictJointPredictYModelStack(*fmods)
     else:
         return _fantasized_model(model, fantasized_data)
 
 
-class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObservationNoise):
+class _fantasized_model(
+    SupportsPredictJoint, SupportsGetKernel, SupportsGetObservationNoise, SupportsPredictY
+):
     """
     Creates a new model from an existing one and additional data.
     This new model posterior is conditioned on both current model data and the additional one.
@@ -636,6 +661,11 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
         self._fantasized_query_points.assign(fantasized_data.query_points)
         self._fantasized_observations.assign(fantasized_data.observations)
 
+    @check_shapes(
+        "query_points: [batch..., N, D]",
+        "return[0]: [batch..., ..., N, L]",
+        "return[1]: [batch..., ..., N, L]",
+    )
     def predict(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
         """
         This function wraps conditional_predict_f. It cannot directly call
@@ -643,11 +673,11 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
         We use map_fn to allow leading dimensions for query_points.
 
         :param query_points: shape [...*, N, d]
-        :return: mean, shape [...*, ..., N, L] and cov, shape [...*, ..., L, N],
+        :return: mean, shape [...*, ..., N, L] and cov, shape [...*, ..., N, L],
             where ... are the leading dimensions of fantasized_data
         """
 
-        def fun(qp: TensorType) -> tuple[TensorType, TensorType]:
+        def fun(qp: TensorType) -> tuple[TensorType, TensorType]:  # pragma: no cover (tf.map_fn)
             fantasized_data = Dataset(
                 self._fantasized_query_points.value(), self._fantasized_observations.value()
             )
@@ -655,6 +685,11 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
 
         return _broadcast_predict(query_points, fun)
 
+    @check_shapes(
+        "query_points: [batch..., N, D]",
+        "return[0]: [batch..., ..., N, L]",
+        "return[1]: [batch..., ..., L, N, N]",
+    )
     def predict_joint(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
         """
         This function wraps conditional_predict_joint. It cannot directly call
@@ -666,7 +701,7 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
             where ... are the leading dimensions of fantasized_data
         """
 
-        def fun(qp: TensorType) -> tuple[TensorType, TensorType]:
+        def fun(qp: TensorType) -> tuple[TensorType, TensorType]:  # pragma: no cover (tf.map_fn)
             fantasized_data = Dataset(
                 self._fantasized_query_points.value(), self._fantasized_observations.value()
             )
@@ -674,6 +709,10 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
 
         return _broadcast_predict(query_points, fun)
 
+    @check_shapes(
+        "query_points: [batch..., N, D]",
+        "return: [batch..., ..., S, N, L]",
+    )
     def sample(self, query_points: TensorType, num_samples: int) -> TensorType:
         """
         This function wraps conditional_predict_f_sample. It cannot directly call
@@ -681,6 +720,7 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
         We use map_fn to allow leading dimensions for query_points.
 
         :param query_points: shape [...*, N, D]
+        :param num_samples: number of samples.
         :return: samples of shape [...*, ..., S, N, L], where ... are the leading
             dimensions of fantasized_data
         """
@@ -699,6 +739,11 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
         )  # [B, ..., S, L]
         return _restore_leading_dim(samples, leading_dim)
 
+    @check_shapes(
+        "query_points: [broadcast batch..., N, D]",
+        "return[0]: [batch..., ..., N, L]",
+        "return[1]: [batch..., ..., N, L]",
+    )
     def predict_y(self, query_points: TensorType) -> tuple[TensorType, TensorType]:
         """
         This function wraps conditional_predict_y. It cannot directly call
@@ -706,11 +751,11 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
         We use tf.map_fn to allow leading dimensions for query_points.
 
         :param query_points: shape [...*, N, D]
-        :return: mean, shape [...*, ..., N, L] and var, shape [...*, ..., L, N],
+        :return: mean, shape [...*, ..., N, L] and var, shape [...*, ..., N, L],
             where ... are the leading dimensions of fantasized_data
         """
 
-        def fun(qp: TensorType) -> tuple[TensorType, TensorType]:
+        def fun(qp: TensorType) -> tuple[TensorType, TensorType]:  # pragma: no cover (tf.map_fn)
             fantasized_data = Dataset(
                 self._fantasized_query_points.value(), self._fantasized_observations.value()
             )
@@ -724,8 +769,8 @@ class _fantasized_model(SupportsPredictJoint, SupportsGetKernel, SupportsGetObse
     def get_kernel(self) -> gpflow.kernels.Kernel:
         return self._model.get_kernel()
 
-    def log(self) -> None:
-        return self._model.log()
+    def log(self, dataset: Optional[Dataset] = None) -> None:
+        return self._model.log(dataset)
 
 
 def _broadcast_predict(

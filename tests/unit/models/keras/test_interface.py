@@ -14,11 +14,9 @@
 
 from __future__ import annotations
 
-import copy
-
 import gpflow
 import pytest
-import tensorflow as tf
+from gpflow.keras import tf_keras
 
 from tests.util.misc import empty_dataset, raise_exc
 from trieste.models.keras import KerasPredictor
@@ -27,7 +25,7 @@ from trieste.models.optimizer import KerasOptimizer
 
 class _DummyKerasPredictor(KerasPredictor):
     @property
-    def model(self) -> tf.keras.Model:
+    def model(self) -> tf_keras.Model:
         return raise_exc
 
 
@@ -41,13 +39,13 @@ def test_keras_predictor_default_optimizer_is_correct() -> None:
     model = _DummyKerasPredictor()
 
     assert isinstance(model._optimizer, KerasOptimizer)
-    assert isinstance(model._optimizer.optimizer, tf.optimizers.Adam)
+    assert isinstance(model._optimizer.optimizer, tf_keras.optimizers.Adam)
     assert isinstance(model.optimizer, KerasOptimizer)
-    assert isinstance(model.optimizer.optimizer, tf.optimizers.Adam)
+    assert isinstance(model.optimizer.optimizer, tf_keras.optimizers.Adam)
 
 
 def test_keras_predictor_check_optimizer_property() -> None:
-    optimizer = KerasOptimizer(tf.optimizers.RMSprop())
+    optimizer = KerasOptimizer(tf_keras.optimizers.RMSprop())
     model = _DummyKerasPredictor(optimizer)
 
     assert model.optimizer == optimizer
@@ -61,13 +59,5 @@ def test_keras_predictor_raises_on_sample_call() -> None:
 
 
 def test_keras_predictor_raises_for_non_tf_optimizer() -> None:
-
     with pytest.raises(ValueError):
         _DummyKerasPredictor(optimizer=KerasOptimizer(gpflow.optimizers.Scipy()))
-
-
-def test_keras_predictor_deepcopy_raises_not_implemented() -> None:
-    model = _DummyKerasPredictor()
-
-    with pytest.raises(NotImplementedError):
-        copy.deepcopy(model)
